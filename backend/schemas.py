@@ -17,3 +17,24 @@ class ZoneResponse(ZoneBase):
 
     class Config:
         from_attributes = True  # Cho phép Pydantic đọc dữ liệu từ SQLAlchemy Model
+#Đăng kí/Đăng nhập
+# Dữ liệu khách gửi lên khi Đăng ký
+class UserCreate(BaseModel):
+    username: str
+    password: str
+    name: str
+
+# Dữ liệu trả về (ẩn mật khẩu đi)
+class UserResponse(BaseModel):
+    id: int
+    username: str
+    name: str
+    role: str
+
+    class Config:
+        from_attributes = True
+
+# Dữ liệu Token trả về khi Đăng nhập thành công
+class Token(BaseModel):
+    access_token: str
+    token_type: str        

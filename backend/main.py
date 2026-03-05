@@ -1,6 +1,8 @@
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from fastapi.security import OAuth2PasswordRequestForm
+import auth 
 import models, schemas
 from database import engine, get_db
 
@@ -78,3 +80,40 @@ def delete_zone(zone_id: int, db: Session = Depends(get_db)):
     db.delete(db_zone)
     db.commit()
     return {"message": "Đã xóa khu vực thành công"}
+
+# ==========================================
+# API ĐĂNG KÝ VÀ ĐĂNG NHẬP
+# ==========================================
+
+@app.post("/api/register", response_model=schemas.UserResponse)
+def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
+    # 1. Kiểm tra xem username đã tồn tại chưa
+    db_user = db.query(models.User).filter(models.User.username == user.username).first()
+    if db_user:
+        raise HTTPException(status_code=400, detail="Tên đăng nhập đã tồn tại!")
+    
+    # 2. Băm mật khẩu và lưu vào DB
+    hashed_pw = auth.get_password_hash(user.password)
+    new_user = models.User(
+        username=user.username, 
+        hashed_password=hashed_pw, 
+        name=user.name
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+@app.post("/api/login", response_model=schemas.Token)
+def login_user(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    # 1. Tìm user trong Database
+    user = db.query(models.User).filter(models.User.username == form_data.username).first()
+    
+    # 2. Kiểm tra tài khoản và mật khẩu
+    if not user or not auth.verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Sai tên đăng nhập hoặc mật khẩu!")
+    
+    # 3. Đăng nhập thành công -> Tạo JWT Token
+    access_token = auth.create_access_token(data={"sub": user.username, "role": user.role})
+    
+    return {"access_token": access_token, "token_type": "bearer"}

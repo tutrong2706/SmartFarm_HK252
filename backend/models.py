@@ -68,3 +68,11 @@ class SystemLog(Base):
     target_id = Column(Integer)
     changes = Column(JSON) # LƯU Ý: Lưu đối tượng JSON (old/new) tại đây
     created_at = Column(DateTime, default=datetime.utcnow)
+class User(Base):
+    __tablename__ = "users"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, index=True)
+    hashed_password = Column(String) # Tuyệt đối không lưu mật khẩu gốc
+    name = Column(String)
+    role = Column(String, default="FARMER") # Có thể là ADMIN hoặc FARMER    
