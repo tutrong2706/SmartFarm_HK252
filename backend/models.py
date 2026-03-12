@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey, JSON, DateTime
+from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey, JSON, DateTime, Text
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database import Base
@@ -56,18 +56,60 @@ class Device(Base):
     zone = relationship("Zone", back_populates="devices")
     device_type = relationship("DeviceType", back_populates="devices")
 
-# 5. Bảng Nhật ký hệ thống (System Logs) - Phục vụ chức năng Audit Log (JSONB)
-class SystemLog(Base):
-    __tablename__ = "system_logs"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    actor_id = Column(Integer, nullable=True)
-    actor_type = Column(String) # 'ADMIN', 'FARMER', 'SYSTEM_AUTO'
-    action_type = Column(String) # 'UPDATE_CONFIG', 'CONTROL_DEVICE'
-    target_entity = Column(String) # Tên bảng bị tác động (vd: 'devices')
-    target_id = Column(Integer)
-    changes = Column(JSON) # LƯU Ý: Lưu đối tượng JSON (old/new) tại đây
-    created_at = Column(DateTime, default=datetime.utcnow)
+# 5. Bảng Nhật ký & Cảnh báo hệ thống (Alert Logs)
+class AlertLog(Base):
+    """
+    Ghi lại 4 loại sự kiện:
+      critical   — vượt ngưỡng sinh thái, mất kết nối sensor/gateway
+      warning    — tiệm cận ngưỡng, thiết bị chạy lâu, bể nước cạn
+      automation — hành động tự động (kích hoạt bơm, tắt đèn, khôi phục)
+      system     — audit log: thay đổi cấu hình, thao tác thủ công
+    """
+    __tablename__ = "alert_logs"
+
+    id           = Column(Integer, primary_key=True, index=True)
+
+    # ── Phân loại ───────────────────────────────────────────────
+    log_type     = Column(String, nullable=False, index=True)
+    # Giá trị: "critical" | "warning" | "automation" | "system"
+
+    severity     = Column(String, nullable=False, default="info")
+    # Giá trị: "critical" | "warning" | "info" | "success"
+    # (dùng để tô màu ở frontend, tách riêng với log_type cho linh hoạt)
+
+    # ── Nguồn / đối tượng liên quan ─────────────────────────────
+    zone_id      = Column(Integer, ForeignKey("zones.id"), nullable=True)
+    device_id    = Column(Integer, ForeignKey("devices.id"), nullable=True)
+
+    # ── Nội dung ─────────────────────────────────────────────────
+    title        = Column(String, nullable=False)          # Tiêu đề ngắn
+    message      = Column(Text, nullable=False)            # Nội dung chi tiết
+
+    # ── Hành động đi kèm (nút bấm phía frontend) ────────────────
+    action_label = Column(String, nullable=True)           # vd: "Bật bơm giải nhiệt ngay"
+    action_type  = Column(String, nullable=True)
+    # Giá trị: "toggle_device" | "navigate_zone" | "navigate_device" | None
+
+    action_target_id = Column(Integer, nullable=True)
+    # ID thiết bị cần bật/tắt, hoặc ID zone cần điều hướng
+
+    # ── Người/Hệ thống tạo log ───────────────────────────────────
+    actor        = Column(String, nullable=True)           # vd: "Admin Nguyễn Lê", "SYSTEM"
+
+    # ── Trạng thái đã đọc ────────────────────────────────────────
+    is_read      = Column(Boolean, default=False, index=True)
+
+    # ── Giá trị đo (để cảnh báo threshold) ──────────────────────
+    metric_key   = Column(String, nullable=True)           # "temperature" | "humidity" | "light"
+    metric_value = Column(Float, nullable=True)            # giá trị thực đo
+    threshold    = Column(Float, nullable=True)            # ngưỡng bị vượt
+
+    # ── Thời gian ────────────────────────────────────────────────
+    created_at   = Column(DateTime, default=datetime.utcnow, index=True)
+
+    # ── Relationships ────────────────────────────────────────────
+    zone   = relationship("Zone")
+    device = relationship("Device")
 class User(Base):
     __tablename__ = "users"
     

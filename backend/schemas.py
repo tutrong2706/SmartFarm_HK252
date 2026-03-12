@@ -1,5 +1,6 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Literal
+from datetime import datetime
 
 # Base schema chứa các trường chung
 class ZoneBase(BaseModel):
@@ -83,4 +84,54 @@ class UserResponse(BaseModel):
 # Dữ liệu Token trả về khi Đăng nhập thành công
 class Token(BaseModel):
     access_token: str
-    token_type: str        
+    token_type: str
+
+
+# ── Alert Logs ────────────────────────────────────────────────────────────────
+
+LogType      = Literal["critical", "warning", "automation", "system"]
+SeverityType = Literal["critical", "warning", "info", "success"]
+ActionType   = Literal["toggle_device", "navigate_zone", "navigate_device"]
+
+
+class AlertLogCreate(BaseModel):
+    """Dùng khi tạo log thủ công (từ frontend hoặc nội bộ backend)."""
+    log_type:         LogType
+    severity:         SeverityType
+    title:            str
+    message:          str
+    zone_id:          Optional[int]   = None
+    device_id:        Optional[int]   = None
+    action_label:     Optional[str]   = None
+    action_type:      Optional[ActionType] = None
+    action_target_id: Optional[int]   = None
+    actor:            Optional[str]   = None
+    metric_key:       Optional[str]   = None    # "temperature" | "humidity" | "light"
+    metric_value:     Optional[float] = None
+    threshold:        Optional[float] = None
+
+
+class AlertLogResponse(BaseModel):
+    id:               int
+    log_type:         str
+    severity:         str
+    title:            str
+    message:          str
+    zone_id:          Optional[int]   = None
+    device_id:        Optional[int]   = None
+    action_label:     Optional[str]   = None
+    action_type:      Optional[str]   = None
+    action_target_id: Optional[int]   = None
+    actor:            Optional[str]   = None
+    is_read:          bool
+    metric_key:       Optional[str]   = None
+    metric_value:     Optional[float] = None
+    threshold:        Optional[float] = None
+    created_at:       datetime
+
+    # Resolved at query time
+    zone_name:        Optional[str]   = None
+    device_name:      Optional[str]   = None
+
+    class Config:
+        from_attributes = False   # built manually in endpoints

@@ -29,6 +29,11 @@ import LayersIcon from '@mui/icons-material/Layers'
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline'
 import LocalFloristIcon from '@mui/icons-material/LocalFlorist'
 import WarningAmberIcon from '@mui/icons-material/WarningAmber'
+import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline'
+import AutorenewIcon from '@mui/icons-material/Autorenew'
+import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined'
+import DoneAllIcon from '@mui/icons-material/DoneAll'
+import Badge from '@mui/material/Badge'
 
 const drawerWidth = 240
 
@@ -45,15 +50,31 @@ const parseJwt = (token) => {
   try { return JSON.parse(atob(token.split('.')[1])) } catch { return null }
 }
 
-// Log data với severity
-const LOG_DATA = (temp, humid) => [
-  { msg: 'Nhiệt độ Vườn 1 vượt ngưỡng 35°C', time: 'Vừa xong', severity: 'error' },
-  { msg: 'Máy bơm Vườn 2 đã bật tự động', time: '5 phút trước', severity: 'success' },
-  { msg: `Cảm biến: ${temp}°C / ${humid}%`, time: 'Realtime', severity: 'info' },
-  { msg: 'Độ ẩm đất Vườn 3 thấp dưới ngưỡng', time: '8 phút trước', severity: 'warn' },
-  { msg: 'Admin đăng nhập hệ thống', time: '10 phút trước', severity: 'info' },
-  { msg: 'Đèn LED Khu B tắt theo lịch', time: '15 phút trước', severity: 'success' },
-]
+// ── Log severity → style map ──────────────────────────────────────────────────
+const LOG_SEVERITY_MAP = {
+  critical: { color: '#d32f2f', bg: '#ffebee', icon: ErrorOutlineIcon,       dotClass: 'log-dot-error' },
+  warning:  { color: '#e65100', bg: '#fff3e0', icon: WarningAmberIcon,        dotClass: 'log-dot-warn'  },
+  success:  { color: '#2e7d32', bg: '#e8f5e9', icon: CheckCircleOutlineIcon,  dotClass: 'log-dot-success' },
+  info:     { color: '#1565c0', bg: '#e3f2fd', icon: InfoOutlinedIcon,        dotClass: 'log-dot-info'  },
+}
+
+const LOG_TYPE_LABEL = {
+  critical:   '🔴 Khẩn cấp',
+  warning:    '🟡 Cảnh báo',
+  automation: '🟢 Tự động',
+  system:     '⚪ Hệ thống',
+}
+
+function relLogTime(isoString) {
+  if (!isoString) return ''
+  const diff = Math.floor((Date.now() - new Date(isoString).getTime()) / 1000)
+  if (diff < 60)   return `${diff} giây trước`
+  if (diff < 3600) return `${Math.floor(diff / 60)} phút trước`
+  if (diff < 86400) return `${Math.floor(diff / 3600)} giờ trước`
+  return `${Math.floor(diff / 86400)} ngày trước`
+}
+
+const API = 'http://localhost:8000'
 
 export default function Dashboard() {
   const navigate = useNavigate()
@@ -65,6 +86,9 @@ export default function Dashboard() {
   const [perZoneData, setPerZoneData] = useState({})   // zone_id → latest reading
   const [currentUser, setCurrentUser] = useState({ name: 'Đang tải...', role: '' })
   const [wsStatus, setWsStatus]       = useState('connecting')
+  const [logs, setLogs]               = useState([])
+  const [unreadCount, setUnreadCount] = useState(0)
+  const [logTick, setLogTick]         = useState(0)   // force relative-time re-render
 
   const plantedCount   = zones.filter(z => z.crop_setting_id).length
   const describedCount = zones.filter(z => z.description).length
@@ -75,12 +99,39 @@ export default function Dashboard() {
     navigate('/login')
   }
 
+  // ── Fetch logs từ API ────────────────────────────────────────────
+  const fetchLogs = async () => {
+    try {
+      const [logsRes, cntRes] = await Promise.all([
+        axios.get(`${API}/api/logs/?limit=20`),
+        axios.get(`${API}/api/logs/unread-count`),
+      ])
+      setLogs(logsRes.data)
+      setUnreadCount(cntRes.data.unread ?? 0)
+    } catch { /* backend chưa chạy → im lặng */ }
+  }
+
+  const markAllRead = async () => {
+    try {
+      await axios.post(`${API}/api/logs/read-all`)
+      fetchLogs()
+    } catch { /* ignore */ }
+  }
+
   useEffect(() => {
     const token = localStorage.getItem('access_token')
     if (!token) { navigate('/login'); return }
     const payload = parseJwt(token)
     if (!payload) { handleLogout(); return }
     setCurrentUser({ name: payload.name || payload.sub || 'Người dùng', role: payload.role || 'USER' })
+  }, [])
+
+  // Poll logs mỗi 15s + tick relative-time mỗi 30s
+  useEffect(() => {
+    fetchLogs()
+    const pollTimer = setInterval(fetchLogs, 15_000)
+    const tickTimer = setInterval(() => setLogTick(t => t + 1), 30_000)
+    return () => { clearInterval(pollTimer); clearInterval(tickTimer) }
   }, [])
 
   const fetchZones = async () => {
@@ -103,6 +154,14 @@ export default function Dashboard() {
       ws.onmessage = (e) => {
         try {
           const d = JSON.parse(e.data)
+
+          // ── NEW LOG broadcast from backend ──────────────────────────
+          if (d._type === 'new_log') {
+            setLogs(prev => [d, ...prev.slice(0, 19)])
+            setUnreadCount(c => c + 1)
+            return
+          }
+
           if (!d.zone_id) return
           // Lưu reading mới nhất per-zone
           setPerZoneData(prev => ({ ...prev, [d.zone_id]: d }))
@@ -364,26 +423,131 @@ export default function Dashboard() {
 
               {/* LOG card */}
               <Card className="log-card" elevation={0}>
-                <Box className="log-card-header">
-                  <Typography variant="h6" fontWeight="800" color="primary.dark"
-                    sx={{ display: 'flex', alignItems: 'center', gap: 1, fontSize: '0.95rem' }}>
-                    <NotificationsActiveIcon sx={{ fontSize: 20, color: '#2e7d32' }} />
-                    Nhật ký hệ thống
-                  </Typography>
-                  <Typography sx={{ fontSize: '0.73rem', color: '#bdbdbd', mt: 0.3 }}>
-                    Hoạt động gần nhất
-                  </Typography>
+                {/* Header */}
+                <Box className="log-card-header" sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
+                  <Box>
+                    <Typography variant="h6" fontWeight="800" color="primary.dark"
+                      sx={{ display: 'flex', alignItems: 'center', gap: 1, fontSize: '0.95rem' }}>
+                      <Badge badgeContent={unreadCount || null} color="error" max={99}>
+                        <NotificationsActiveIcon sx={{ fontSize: 20, color: '#2e7d32' }} />
+                      </Badge>
+                      Nhật ký hệ thống
+                    </Typography>
+                    <Typography sx={{ fontSize: '0.73rem', color: '#bdbdbd', mt: 0.3 }}>
+                      {unreadCount > 0 ? `${unreadCount} chưa đọc · ` : ''}Hoạt động gần nhất
+                    </Typography>
+                  </Box>
+                  {unreadCount > 0 && (
+                    <Button size="small" startIcon={<DoneAllIcon sx={{ fontSize: 14 }} />}
+                      onClick={markAllRead}
+                      sx={{ textTransform: 'none', fontSize: '0.7rem', color: '#757575',
+                        '&:hover': { color: '#2e7d32' }, minWidth: 0, py: 0.3, px: 1 }}>
+                      Đọc tất cả
+                    </Button>
+                  )}
                 </Box>
+
+                {/* Log list */}
                 <Box className="log-scroll-area">
-                  {LOG_DATA(sensorData.temperature, sensorData.humidity).map((log, i) => (
-                    <Box key={i} className="log-item">
-                      <Box className={`log-dot log-dot-${log.severity}`} />
-                      <Box>
-                        <Typography className="log-item-msg">{log.msg}</Typography>
-                        <Typography className="log-item-time">{log.time}</Typography>
-                      </Box>
+                  {logs.length === 0 ? (
+                    <Box sx={{ py: 3, textAlign: 'center' }}>
+                      <CheckCircleOutlineIcon sx={{ fontSize: 28, color: '#c8e6c9', mb: 0.5 }} />
+                      <Typography sx={{ fontSize: '0.78rem', color: '#bdbdbd' }}>
+                        Chưa có nhật ký nào
+                      </Typography>
                     </Box>
-                  ))}
+                  ) : logs.map((log) => {
+                    const style  = LOG_SEVERITY_MAP[log.severity] ?? LOG_SEVERITY_MAP.info
+                    const isNew  = !log.is_read
+                    return (
+                      <Box key={log.id} className="log-item"
+                        sx={{
+                          bgcolor: isNew ? `${style.color}08` : 'transparent',
+                          borderLeft: isNew ? `3px solid ${style.color}` : '3px solid transparent',
+                          pl: isNew ? 1 : 1.5,
+                          borderRadius: 1,
+                          py: 0.8,
+                          transition: 'background 0.2s',
+                        }}>
+                        {/* dot + type chip */}
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8, mb: 0.3 }}>
+                          <Box sx={{
+                            width: 8, height: 8, borderRadius: '50%',
+                            bgcolor: style.color, flexShrink: 0,
+                          }} />
+                          <Typography sx={{
+                            fontSize: '0.66rem', fontWeight: 800,
+                            color: style.color, textTransform: 'uppercase', letterSpacing: 0.5,
+                          }}>
+                            {LOG_TYPE_LABEL[log.log_type] ?? log.log_type}
+                          </Typography>
+                          {log.zone_name && (
+                            <Typography sx={{ fontSize: '0.66rem', color: '#9e9e9e' }}>
+                              · {log.zone_name}
+                            </Typography>
+                          )}
+                        </Box>
+
+                        {/* title + message */}
+                        <Typography sx={{
+                          fontSize: '0.86rem', fontWeight: isNew ? 700 : 600,
+                          color: isNew ? '#212121' : '#424242', lineHeight: 1.4,
+                        }}>
+                          {log.title}
+                        </Typography>
+                        <Typography sx={{ fontSize: '0.78rem', color: '#616161', mt: 0.3, lineHeight: 1.45 }}>
+                          {log.message}
+                        </Typography>
+
+                        {/* metric badge */}
+                        {log.metric_value !== null && log.metric_value !== undefined && (
+                          <Box sx={{ display: 'flex', gap: 0.5, mt: 0.4, flexWrap: 'wrap' }}>
+                            <Chip
+                              label={`Đo: ${log.metric_value}${log.metric_key === 'temperature' ? '°C' : log.metric_key === 'humidity' ? '%' : ' lx'}`}
+                              size="small"
+                              sx={{ height: 18, fontSize: '0.6rem', bgcolor: `${style.color}18`, color: style.color, fontWeight: 700 }}
+                            />
+                            {log.threshold !== null && log.threshold !== undefined && (
+                              <Chip
+                                label={`Ngưỡng: ${log.threshold}${log.metric_key === 'temperature' ? '°C' : '%'}`}
+                                size="small"
+                                variant="outlined"
+                                sx={{ height: 18, fontSize: '0.6rem', borderColor: style.color, color: style.color }}
+                              />
+                            )}
+                          </Box>
+                        )}
+
+                        {/* footer: time + action button */}
+                        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 0.5 }}>
+                          <Typography sx={{ fontSize: '0.68rem', color: '#9e9e9e' }}>
+                            {relLogTime(log.created_at)}
+                            {log.actor && log.actor !== 'SYSTEM' ? ` · ${log.actor}` : ''}
+                          </Typography>
+                          {log.action_label && (
+                            <Button size="small" variant="contained"
+                              sx={{
+                                height: 24, fontSize: '0.7rem', px: 1.5, py: 0,
+                                textTransform: 'none', fontWeight: 700,
+                                bgcolor: style.color,
+                                color: '#ffffff',
+                                '&:hover': { bgcolor: style.color, filter: 'brightness(0.85)', color: '#ffffff' },
+                                borderRadius: 1.5, minWidth: 0, lineHeight: 1,
+                                boxShadow: `0 2px 6px ${style.color}55`,
+                              }}
+                              onClick={() => {
+                                if (log.action_type === 'navigate_zone' && log.zone_id)
+                                  navigate(`/zones/${log.zone_id}`)
+                                else if (log.action_type === 'navigate_device' || log.action_type === 'toggle_device')
+                                  navigate('/device-management')
+                              }}>
+                              {log.action_label}
+                            </Button>
+                          )}
+                        </Box>
+                      </Box>
+                    )
+                  })}
                 </Box>
               </Card>
             </Box>

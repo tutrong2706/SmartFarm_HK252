@@ -1,10 +1,11 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi import WebSocket, WebSocketDisconnect
-from typing import List
-import auth 
+from typing import List, Optional
+from datetime import datetime, timezone
+import auth
 import models, schemas
 from database import engine, get_db
 
@@ -89,6 +90,33 @@ def patch_zone(zone_id: int, zone_patch: schemas.ZonePatch, db: Session = Depend
     if db_zone is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy khu vực này")
     update_data = zone_patch.model_dump(exclude_unset=True)
+
+    # ── Ghi log khi gán / đổi cây trồng ──────────────────────────
+    if "crop_setting_id" in update_data:
+        new_crop_id = update_data["crop_setting_id"]
+        if new_crop_id != db_zone.crop_setting_id:
+            new_crop_name = None
+            if new_crop_id:
+                nc = db.query(models.CropSetting).filter(models.CropSetting.id == new_crop_id).first()
+                new_crop_name = nc.crop_name if nc else f"#{new_crop_id}"
+            old_crop_name = None
+            if db_zone.crop_setting_id:
+                oc = db.query(models.CropSetting).filter(models.CropSetting.id == db_zone.crop_setting_id).first()
+                old_crop_name = oc.crop_name if oc else f"#{db_zone.crop_setting_id}"
+            if new_crop_name:
+                msg = (f"Khu vực '{db_zone.name}' đã được gán cây trồng '{new_crop_name}'"
+                       + (f" (trước đó: '{old_crop_name}')" if old_crop_name else "") + ".")
+            else:
+                msg = f"Khu vực '{db_zone.name}' đã xoá cây trồng (trước đó: '{old_crop_name}')."
+            log_event(db,
+                log_type = "system",
+                severity = "info",
+                title    = f"Thay đổi cây trồng — {db_zone.name}",
+                message  = msg,
+                zone_id  = zone_id,
+                actor    = "Admin",
+            )
+
     for key, value in update_data.items():
         setattr(db_zone, key, value)
     db.commit()
@@ -129,6 +157,18 @@ def assign_device_to_zone(zone_id: int, device_id: int, db: Session = Depends(ge
     db.commit()
     db.refresh(device)
     dtype = db.query(models.DeviceType).filter(models.DeviceType.id == device.type_id).first()
+
+    # ── Ghi log gán thiết bị ──────────────────────────────────────
+    log_event(db,
+        log_type  = "system",
+        severity  = "info",
+        title     = f"Gán thiết bị vào khu vực — {zone.name}",
+        message   = f"Thiết bị '{device.name}' đã được gán vào {zone.name}.",
+        zone_id   = zone_id,
+        device_id = device.id,
+        actor     = "Admin",
+    )
+
     return schemas.DeviceResponse(
         id          = device.id,
         device_name = device.name,
@@ -148,10 +188,25 @@ def remove_device_from_zone(zone_id: int, device_id: int, db: Session = Depends(
     ).first()
     if not device:
         raise HTTPException(status_code=404, detail="Không tìm thấy thiết bị trong khu vực này")
+    zone = db.query(models.Zone).filter(models.Zone.id == zone_id).first()
+    dev_name  = device.name
+    zone_name = zone.name if zone else f"#{zone_id}"
     device.zone_id = None
     db.commit()
     db.refresh(device)
     dtype = db.query(models.DeviceType).filter(models.DeviceType.id == device.type_id).first()
+
+    # ── Ghi log gỡ thiết bị ───────────────────────────────────────
+    log_event(db,
+        log_type  = "system",
+        severity  = "info",
+        title     = f"Gỡ thiết bị khỏi khu vực — {zone_name}",
+        message   = f"Thiết bị '{dev_name}' đã bị gỡ khỏi {zone_name}.",
+        zone_id   = zone_id,
+        device_id = device.id,
+        actor     = "Admin",
+    )
+
     return schemas.DeviceResponse(
         id          = device.id,
         device_name = device.name,
@@ -195,7 +250,33 @@ def update_crop_setting(crop_id: int, crop_data: schemas.CropSettingCreate, db: 
     crop = db.query(models.CropSetting).filter(models.CropSetting.id == crop_id).first()
     if crop is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy cấu hình cây trồng")
-    for field, value in crop_data.model_dump().items():
+
+    # ── Ghi log các thay đổi ngưỡng ──────────────────────────────
+    changes = []
+    new_vals = crop_data.model_dump()
+    field_labels = {
+        "temp_min":  "Nhiệt độ tối thiểu",
+        "temp_max":  "Nhiệt độ tối đa",
+        "humid_min": "Độ ẩm tối thiểu",
+        "humid_max": "Độ ẩm tối đa",
+    }
+    for field, label in field_labels.items():
+        old_val = getattr(crop, field)
+        new_val = new_vals.get(field)
+        if new_val is not None and old_val != new_val:
+            unit = "°C" if "temp" in field else "%"
+            changes.append(f"{label}: {old_val}{unit} → {new_val}{unit}")
+
+    if changes:
+        log_event(db,
+            log_type = "system",
+            severity = "info",
+            title    = f"Thay đổi cấu hình cây trồng — {crop.crop_name}",
+            message  = f"Admin vừa cập nhật ngưỡng '{crop.crop_name}': " + "; ".join(changes) + ".",
+            actor    = "Admin",
+        )
+
+    for field, value in new_vals.items():
         setattr(crop, field, value)
     db.commit()
     db.refresh(crop)
@@ -239,10 +320,31 @@ def toggle_device(device_id: int, body: schemas.DeviceToggle, db: Session = Depe
     device = db.query(models.Device).filter(models.Device.id == device_id).first()
     if device is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy thiết bị")
+    prev_state = device.is_active
     device.is_active = body.is_active
     db.commit()
     db.refresh(device)
     dtype = db.query(models.DeviceType).filter(models.DeviceType.id == device.type_id).first()
+
+    # ── Ghi log thao tác thủ công ──────────────────────────────────
+    if prev_state != body.is_active:
+        action_word = "bật" if body.is_active else "tắt"
+        zone_name   = None
+        if device.zone_id:
+            z = db.query(models.Zone).filter(models.Zone.id == device.zone_id).first()
+            zone_name = z.name if z else None
+        log_event(db,
+            log_type    = "system",
+            severity    = "info",
+            title       = f"Thao tác thủ công — {action_word.capitalize()} thiết bị",
+            message     = (f"Người dùng vừa {action_word} thiết bị '{device.name}'"
+                           + (f" tại {zone_name}" if zone_name else "") + " bằng tay."),
+            zone_id     = device.zone_id,
+            device_id   = device.id,
+            action_type = "navigate_device",
+            actor       = "Manual",
+        )
+
     return schemas.DeviceResponse(
         id          = device.id,
         device_name = device.name,
@@ -334,6 +436,11 @@ manager = ConnectionManager()
 # In-memory store: zone_id → last telemetry payload
 _last_telemetry: dict = {}
 
+# Cooldown cho threshold alert: key=(zone_id, metric, kind) → last_logged datetime
+# Tránh spam: cùng 1 cảnh báo chỉ ghi lại tối đa 1 lần / ALERT_COOLDOWN_SEC giây
+_alert_cooldown: dict = {}
+ALERT_COOLDOWN_SEC = 300   # 5 phút
+
 # --- 1. API ĐỂ IOT GATEWAY GỬI DỮ LIỆU LÊN (POST) ---
 @app.post("/api/telemetry")
 async def receive_telemetry(data: dict, db: Session = Depends(get_db)):
@@ -369,6 +476,94 @@ async def receive_telemetry(data: dict, db: Session = Depends(get_db)):
 
     # Lưu reading cuối cùng vào bộ nhớ
     _last_telemetry[zone_id] = data
+
+    # ── Tự động ghi log khi vượt ngưỡng crop setting ──────────────
+    if zone.crop_setting_id:
+        crop = db.query(models.CropSetting).filter(
+            models.CropSetting.id == zone.crop_setting_id
+        ).first()
+        if crop:
+            temp  = data.get("temperature")
+            humid = data.get("humidity")
+            now   = datetime.now(timezone.utc)
+
+            def _can_log(metric: str, kind: str) -> bool:
+                """True nếu chưa log cảnh báo này trong ALERT_COOLDOWN_SEC giây."""
+                key  = (zone_id, metric, kind)
+                last = _alert_cooldown.get(key)
+                if last and (now - last).total_seconds() < ALERT_COOLDOWN_SEC:
+                    return False
+                _alert_cooldown[key] = now
+                return True
+
+            if temp is not None:
+                if temp > crop.temp_max:
+                    if _can_log("temperature", "critical"):
+                        log_event(db,
+                            log_type    = "critical",
+                            severity    = "critical",
+                            title       = f"Nhiệt độ vượt ngưỡng — {zone.name}",
+                            message     = (f"⚠️ Nhiệt độ {zone.name} đã lên {temp}°C "
+                                           f"(Ngưỡng tối đa: {crop.temp_max}°C). Nguy cơ héo lá!"),
+                            zone_id     = zone_id,
+                            metric_key  = "temperature",
+                            metric_value= float(temp),
+                            threshold   = float(crop.temp_max),
+                            action_label= "Bật quạt giải nhiệt ngay",
+                            action_type = "toggle_device",
+                        )
+                elif temp > crop.temp_max * 0.93:
+                    if _can_log("temperature", "warning"):
+                        log_event(db,
+                            log_type    = "warning",
+                            severity    = "warning",
+                            title       = f"Nhiệt độ tiệm cận ngưỡng — {zone.name}",
+                            message     = (f"Nhiệt độ {zone.name} đang ở {temp}°C, "
+                                           f"gần ngưỡng tối đa {crop.temp_max}°C. Theo dõi chặt!"),
+                            zone_id     = zone_id,
+                            metric_key  = "temperature",
+                            metric_value= float(temp),
+                            threshold   = float(crop.temp_max),
+                        )
+                else:
+                    # Đã trở về bình thường — xoá cooldown để lần tới log lại ngay
+                    _alert_cooldown.pop((zone_id, "temperature", "critical"), None)
+                    _alert_cooldown.pop((zone_id, "temperature", "warning"),  None)
+
+            if humid is not None:
+                if humid < crop.humid_min:
+                    if _can_log("humidity", "critical"):
+                        log_event(db,
+                            log_type    = "critical",
+                            severity    = "critical",
+                            title       = f"Độ ẩm thấp nguy hiểm — {zone.name}",
+                            message     = (f"⚠️ Độ ẩm {zone.name} chỉ còn {humid}% "
+                                           f"(Ngưỡng tối thiểu: {crop.humid_min}%). Cần tưới ngay!"),
+                            zone_id     = zone_id,
+                            metric_key  = "humidity",
+                            metric_value= float(humid),
+                            threshold   = float(crop.humid_min),
+                            action_label= "Bật bơm tưới ngay",
+                            action_type = "toggle_device",
+                        )
+                elif humid < crop.humid_min * 1.05:
+                    if _can_log("humidity", "warning"):
+                        log_event(db,
+                            log_type    = "warning",
+                            severity    = "warning",
+                            title       = f"Độ ẩm tiệm cận ngưỡng — {zone.name}",
+                            message     = (f"Độ ẩm {zone.name} đang giảm, hiện ở {humid}% "
+                                           f"(Ngưỡng tối thiểu: {crop.humid_min}%)."),
+                            zone_id     = zone_id,
+                            metric_key  = "humidity",
+                            metric_value= float(humid),
+                            threshold   = float(crop.humid_min),
+                            action_label= "Bật bơm tưới",
+                            action_type = "toggle_device",
+                        )
+                else:
+                    _alert_cooldown.pop((zone_id, "humidity", "critical"), None)
+                    _alert_cooldown.pop((zone_id, "humidity", "warning"),  None)
 
     # Broadcast cho tất cả frontend đang mở
     await manager.broadcast(data)
@@ -413,3 +608,203 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+
+
+# ==========================================
+# ALERT LOGS  —  /api/logs/
+# ==========================================
+
+def _build_log_response(log: models.AlertLog, db: Session) -> dict:
+    """Chuyển đổi ORM object → dict response, resolve zone_name & device_name."""
+    zone_name   = None
+    device_name = None
+    if log.zone_id:
+        z = db.query(models.Zone).filter(models.Zone.id == log.zone_id).first()
+        zone_name = z.name if z else None
+    if log.device_id:
+        d = db.query(models.Device).filter(models.Device.id == log.device_id).first()
+        device_name = d.name if d else None
+    return {
+        "id":               log.id,
+        "log_type":         log.log_type,
+        "severity":         log.severity,
+        "title":            log.title,
+        "message":          log.message,
+        "zone_id":          log.zone_id,
+        "device_id":        log.device_id,
+        "action_label":     log.action_label,
+        "action_type":      log.action_type,
+        "action_target_id": log.action_target_id,
+        "actor":            log.actor,
+        "is_read":          log.is_read,
+        "metric_key":       log.metric_key,
+        "metric_value":     log.metric_value,
+        "threshold":        log.threshold,
+        "created_at":       log.created_at,
+        "zone_name":        zone_name,
+        "device_name":      device_name,
+    }
+
+
+def log_event(
+    db: Session,
+    *,
+    log_type: str,
+    severity: str,
+    title: str,
+    message: str,
+    zone_id:          int   = None,
+    device_id:        int   = None,
+    action_label:     str   = None,
+    action_type:      str   = None,
+    action_target_id: int   = None,
+    actor:            str   = "SYSTEM",
+    metric_key:       str   = None,
+    metric_value:     float = None,
+    threshold:        float = None,
+) -> models.AlertLog:
+    """
+    Helper nội bộ: tạo một AlertLog entry, commit, rồi broadcast WS event
+    với type='new_log' để Dashboard cập nhật tức thì.
+    """
+    entry = models.AlertLog(
+        log_type         = log_type,
+        severity         = severity,
+        title            = title,
+        message          = message,
+        zone_id          = zone_id,
+        device_id        = device_id,
+        action_label     = action_label,
+        action_type      = action_type,
+        action_target_id = action_target_id,
+        actor            = actor,
+        metric_key       = metric_key,
+        metric_value     = metric_value,
+        threshold        = threshold,
+        created_at       = datetime.now(timezone.utc).replace(tzinfo=None),
+    )
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+
+    # Resolve names for the WS push
+    zone_name   = None
+    device_name = None
+    if zone_id:
+        z = db.query(models.Zone).filter(models.Zone.id == zone_id).first()
+        zone_name = z.name if z else None
+    if device_id:
+        dv = db.query(models.Device).filter(models.Device.id == device_id).first()
+        device_name = dv.name if dv else None
+
+    import asyncio
+    ws_payload = {
+        "_type":          "new_log",
+        "id":             entry.id,
+        "log_type":       log_type,
+        "severity":       severity,
+        "title":          title,
+        "message":        message,
+        "zone_id":        zone_id,
+        "zone_name":      zone_name,
+        "device_id":      device_id,
+        "device_name":    device_name,
+        "action_label":   action_label,
+        "action_type":    action_type,
+        "actor":          actor,
+        "metric_key":     metric_key,
+        "metric_value":   metric_value,
+        "threshold":      threshold,
+        "is_read":        False,
+        "created_at":     entry.created_at.isoformat(),
+    }
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(manager.broadcast(ws_payload))
+    except Exception:
+        pass   # broadcast là best-effort, không làm hỏng response
+
+    return entry
+
+
+# ── 1. GET  /api/logs/  — lấy danh sách log (có filter) ──────────────────────
+@app.get("/api/logs/", response_model=list[schemas.AlertLogResponse])
+def get_logs(
+    log_type:  Optional[str] = Query(None, description="critical|warning|automation|system"),
+    severity:  Optional[str] = Query(None),
+    zone_id:   Optional[int] = Query(None),
+    is_read:   Optional[bool] = Query(None),
+    limit:     int = Query(50, ge=1, le=200),
+    offset:    int = Query(0,  ge=0),
+    db: Session = Depends(get_db),
+):
+    q = db.query(models.AlertLog)
+    if log_type: q = q.filter(models.AlertLog.log_type == log_type)
+    if severity: q = q.filter(models.AlertLog.severity == severity)
+    if zone_id:  q = q.filter(models.AlertLog.zone_id == zone_id)
+    if is_read is not None:
+        q = q.filter(models.AlertLog.is_read == is_read)
+    logs = q.order_by(models.AlertLog.created_at.desc()).offset(offset).limit(limit).all()
+    return [_build_log_response(l, db) for l in logs]
+
+
+# ── 2. GET  /api/logs/unread-count  — badge số chưa đọc ─────────────────────
+@app.get("/api/logs/unread-count")
+def get_unread_count(db: Session = Depends(get_db)):
+    count = db.query(models.AlertLog).filter(models.AlertLog.is_read == False).count()
+    return {"unread": count}
+
+
+# ── 3. POST /api/logs/  — tạo log thủ công ───────────────────────────────────
+@app.post("/api/logs/", response_model=schemas.AlertLogResponse, status_code=201)
+def create_log(payload: schemas.AlertLogCreate, db: Session = Depends(get_db)):
+    entry = log_event(
+        db,
+        log_type         = payload.log_type,
+        severity         = payload.severity,
+        title            = payload.title,
+        message          = payload.message,
+        zone_id          = payload.zone_id,
+        device_id        = payload.device_id,
+        action_label     = payload.action_label,
+        action_type      = payload.action_type,
+        action_target_id = payload.action_target_id,
+        actor            = payload.actor or "MANUAL",
+        metric_key       = payload.metric_key,
+        metric_value     = payload.metric_value,
+        threshold        = payload.threshold,
+    )
+    return _build_log_response(entry, db)
+
+
+# ── 4. PATCH /api/logs/{id}/read  — đánh dấu đã đọc ─────────────────────────
+@app.patch("/api/logs/{log_id}/read", response_model=schemas.AlertLogResponse)
+def mark_log_read(log_id: int, db: Session = Depends(get_db)):
+    entry = db.query(models.AlertLog).filter(models.AlertLog.id == log_id).first()
+    if not entry:
+        raise HTTPException(status_code=404, detail="Log không tồn tại")
+    entry.is_read = True
+    db.commit()
+    db.refresh(entry)
+    return _build_log_response(entry, db)
+
+
+# ── 5. POST /api/logs/read-all  — đánh dấu tất cả đã đọc ────────────────────
+@app.post("/api/logs/read-all")
+def mark_all_read(db: Session = Depends(get_db)):
+    updated = db.query(models.AlertLog).filter(models.AlertLog.is_read == False).all()
+    for e in updated:
+        e.is_read = True
+    db.commit()
+    return {"marked_read": len(updated)}
+
+
+# ── 6. DELETE /api/logs/{id}  — xoá 1 log ────────────────────────────────────
+@app.delete("/api/logs/{log_id}", status_code=204)
+def delete_log(log_id: int, db: Session = Depends(get_db)):
+    entry = db.query(models.AlertLog).filter(models.AlertLog.id == log_id).first()
+    if not entry:
+        raise HTTPException(status_code=404, detail="Log không tồn tại")
+    db.delete(entry)
+    db.commit()
