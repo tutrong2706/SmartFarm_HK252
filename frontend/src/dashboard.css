@@ -1,0 +1,788 @@
+/* ============================================
+   GLOBAL RESET
+   ============================================ */
+*, *::before, *::after { box-sizing: border-box; }
+
+/* ============================================
+   CUSTOM SCROLLBAR
+   ============================================ */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #cfd8dc; border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: #90a4ae; }
+
+/* ============================================
+   ANIMATIONS
+   ============================================ */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #4caf50;
+  animation: pulse-dot 1.5s infinite;
+}
+
+/* ============================================
+   ROOT LAYOUT
+   ============================================ */
+.dashboard-root {
+  display: flex;
+  min-height: 100vh;
+  background: #f0f4f0;
+}
+
+/* ============================================
+   SIDEBAR
+   ============================================ */
+.sidebar-paper {
+  background: linear-gradient(180deg, #1b5e20 0%, #2e7d32 60%, #388e3c 100%) !important;
+  color: #fff !important;
+}
+.sidebar-paper .MuiListItemIcon-root {
+  color: rgba(255, 255, 255, 0.65) !important;
+  min-width: 36px;
+}
+.sidebar-paper .MuiListItemText-primary {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.sidebar-logo-area {
+  padding: 14px 20px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  margin-bottom: 4px;
+}
+
+.sidebar-nav-label {
+  font-size: 0.62rem !important;
+  font-weight: 800 !important;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.4) !important;
+  padding: 8px 20px 4px;
+}
+
+.sidebar-item {
+  border-radius: 10px !important;
+  margin: 2px 10px !important;
+  padding: 7px 12px !important;
+  transition: background 0.18s !important;
+}
+.sidebar-item:hover {
+  background: rgba(255, 255, 255, 0.1) !important;
+}
+.sidebar-item-active {
+  background: rgba(255, 255, 255, 0.15) !important;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+.sidebar-item-active .MuiListItemIcon-root {
+  color: #a5d6a7 !important;
+}
+.sidebar-item-active .MuiListItemText-primary {
+  color: #fff !important;
+}
+
+/* ============================================
+   MAIN CONTENT AREA
+   ============================================ */
+.dashboard-main {
+  flex: 1;
+  min-width: 0;
+  /* Offset chính xác: sidebar=240px, AppBar=60px */
+  margin-left: 0px;
+  margin-top: 60px;
+  /* Padding đều 2 bên — trái phải bằng nhau */
+  padding: 28px 36px 40px 36px;
+  background: #f0f4f0;
+  min-height: calc(100vh - 60px);
+  width: calc(100vw - 240px);
+}
+
+.dashboard-content {
+  /* Chiếm toàn bộ chiều rộng, KHÔNG giới hạn max-width */
+  width: 100%;
+  animation: fadeInUp 0.35s ease;
+}
+
+/* ============================================
+   TOP ROW  (Hero 1/2 + Stats 1/2)
+   ============================================ */
+.top-row {
+  display: grid;
+  /* Chia đều 50/50 — canh cân đối */
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  margin-bottom: 24px;
+  width: 100%;
+}
+
+/* --- Hero card --- */
+.hero-card {
+  background: linear-gradient(135deg, #1b5e20 0%, #2e7d32 55%, #388e3c 100%) !important;
+  border-radius: 20px !important;
+  overflow: hidden;
+  position: relative;
+  /* Chiều cao cố định để 2 cột bằng nhau */
+  min-height: 230px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.hero-card-inner {
+  position: relative;
+  z-index: 1;
+  padding: 32px 36px 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.hero-greeting {
+  font-size: 1.9rem !important;
+  font-weight: 900 !important;
+  color: #fff !important;
+  line-height: 1.25 !important;
+}
+.hero-role-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255,255,255,0.15);
+  color: rgba(255,255,255,0.9);
+  border-radius: 20px;
+  padding: 5px 14px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  width: fit-content;
+}
+.hero-status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(0,0,0,0.18);
+  border-radius: 12px;
+  padding: 10px 16px;
+}
+.hero-deco-circle {
+  position: absolute !important;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.06);
+  pointer-events: none;
+}
+
+/* --- Stats 2×2 grid — chiều cao bằng hero-card --- */
+.stats-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 16px;
+  /* Kéo dài bằng hero-card */
+  min-height: 230px;
+}
+.stat-card {
+  border-radius: 18px !important;
+  border: 1px solid #e8f5e9 !important;
+  background: #fff !important;
+  transition: box-shadow 0.2s, transform 0.2s;
+  /* Chiếm đều cả ô */
+  display: flex !important;
+  flex-direction: column !important;
+  justify-content: center !important;
+}
+.stat-card:hover {
+  box-shadow: 0 6px 24px rgba(46,125,50,0.14) !important;
+  transform: translateY(-2px);
+}
+.stat-card-inner {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 22px;
+}
+.stat-icon-box {
+  width: 54px;
+  height: 54px;
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.stat-text { flex: 1; min-width: 0; }
+.stat-value {
+  font-size: 2rem !important;
+  font-weight: 900 !important;
+  line-height: 1 !important;
+}
+.stat-label {
+  font-size: 0.85rem !important;
+  font-weight: 700 !important;
+  color: #424242 !important;
+  margin-top: 3px !important;
+}
+.stat-desc {
+  font-size: 0.72rem !important;
+  color: #9e9e9e !important;
+}
+
+/* ============================================
+   MID ROW  (Env 1/2 + Log 1/2)
+   ============================================ */
+.mid-row {
+  display: grid;
+  /* Chia đều 50/50 — canh cân đối */
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  margin-bottom: 24px;
+  width: 100%;
+}
+
+/* --- Env card --- */
+.env-card {
+  border-radius: 20px !important;
+  border: 1px solid #e8f5e9 !important;
+  background: #fff !important;
+  padding: 26px 28px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.env-card-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.env-card-sub {
+  font-size: 0.78rem !important;
+  color: #9e9e9e !important;
+  margin-bottom: 20px !important;
+}
+
+/* Sensor metric boxes — 3 ô cân bằng nhau */
+.sensor-metrics-row {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.sensor-metric {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-radius: 16px;
+  padding: 20px 12px 16px;
+}
+.sensor-metric-temp  { background: #fff8f8; border: 1px solid #ffcdd2; }
+.sensor-metric-humid { background: #f0f8ff; border: 1px solid #bbdefb; }
+.sensor-metric-light { background: #fffde7; border: 1px solid #fff176; }
+
+.sensor-metric-icon { font-size: 34px !important; margin-bottom: 8px; }
+.sensor-metric-icon-temp  { color: #e53935 !important; }
+.sensor-metric-icon-humid { color: #1e88e5 !important; }
+.sensor-metric-icon-light { color: #f9a825 !important; }
+
+.sensor-metric-value {
+  font-size: 1.8rem !important;
+  font-weight: 900 !important;
+  line-height: 1 !important;
+}
+.sensor-metric-value-temp  { color: #e53935 !important; }
+.sensor-metric-value-humid { color: #1e88e5 !important; }
+.sensor-metric-value-light { color: #f9a825 !important; }
+
+.sensor-metric-label {
+  font-size: 0.76rem !important;
+  color: #757575 !important;
+  font-weight: 600 !important;
+  margin-top: 6px !important;
+  text-align: center;
+}
+
+/* Trend row */
+.sensor-trend-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: #f5f5f5;
+  border-radius: 12px;
+  padding: 10px 16px;
+}
+.trend-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #2e7d32;
+}
+.trend-item-warn { color: #e65100; }
+
+/* --- Log card --- */
+.log-card {
+  border-radius: 20px !important;
+  border: 1px solid #e8f5e9 !important;
+  background: #fff !important;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.log-card-header {
+  padding: 22px 24px 12px;
+  border-bottom: 1px solid #f5f5f5;
+}
+.log-scroll-area {
+  overflow-y: auto;
+  flex: 1;
+  padding: 6px 0;
+}
+.log-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 11px 24px;
+  transition: background 0.15s;
+}
+.log-item:hover { background: #f9fbe7; }
+
+.log-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+.log-dot-error   { background: #e53935; box-shadow: 0 0 0 3px #ffcdd2; }
+.log-dot-success { background: #43a047; box-shadow: 0 0 0 3px #c8e6c9; }
+.log-dot-info    { background: #1e88e5; box-shadow: 0 0 0 3px #bbdefb; }
+.log-dot-warn    { background: #fb8c00; box-shadow: 0 0 0 3px #ffe0b2; }
+
+.log-item-msg  { font-size: 0.84rem !important; font-weight: 600 !important; color: #212121 !important; }
+.log-item-time { font-size: 0.71rem !important; color: #bdbdbd !important; }
+
+/* ============================================
+   ZONES SECTION
+   ============================================ */
+.zone-header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.zone-card {
+  width: 100%;
+  border-radius: 18px !important;
+  border: 1px solid #e8f5e9 !important;
+  background: #fff !important;
+  display: flex;
+  flex-direction: column;
+  transition: box-shadow 0.2s, transform 0.2s;
+}
+.zone-card:hover {
+  box-shadow: 0 8px 28px rgba(46,125,50,0.14) !important;
+  transform: translateY(-3px);
+}
+.zone-card-body { flex: 1; padding: 18px 18px 10px !important; }
+.zone-card-name {
+  font-size: 1rem !important;
+  font-weight: 800 !important;
+  color: #1b5e20 !important;
+  margin-bottom: 5px !important;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.zone-card-desc {
+  font-size: 0.81rem !important;
+  color: #757575 !important;
+  min-height: 38px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-bottom: 12px !important;
+}
+.zone-card-meta {
+  display: flex;
+  justify-content: space-between;
+  padding: 7px 0 0;
+  border-top: 1px dashed #e0e0e0;
+}
+.zone-card-footer { padding: 10px 18px 16px !important; }
+
+/* ============================================
+   ROOT LAYOUT
+   ============================================ */
+.dashboard-root {
+  display: flex;
+  min-height: 100vh;
+  background: #f0f4f0;
+}
+
+/* ============================================
+   SIDEBAR
+   ============================================ */
+.sidebar-paper {
+  background: linear-gradient(180deg, #1b5e20 0%, #2e7d32 60%, #388e3c 100%) !important;
+  color: #fff !important;
+}
+.sidebar-paper .MuiListItemIcon-root {
+  color: rgba(255, 255, 255, 0.65) !important;
+  min-width: 36px;
+}
+.sidebar-paper .MuiListItemText-primary {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.sidebar-logo-area {
+  padding: 14px 20px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  margin-bottom: 4px;
+}
+
+.sidebar-nav-label {
+  font-size: 0.62rem !important;
+  font-weight: 800 !important;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.4) !important;
+  padding: 8px 20px 4px;
+}
+
+.sidebar-item {
+  border-radius: 10px !important;
+  margin: 2px 10px !important;
+  padding: 7px 12px !important;
+  transition: background 0.18s !important;
+}
+.sidebar-item:hover {
+  background: rgba(255, 255, 255, 0.1) !important;
+}
+.sidebar-item-active {
+  background: rgba(255, 255, 255, 0.15) !important;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+.sidebar-item-active .MuiListItemIcon-root {
+  color: #a5d6a7 !important;
+}
+.sidebar-item-active .MuiListItemText-primary {
+  color: #fff !important;
+}
+
+/* ============================================
+   MAIN CONTENT AREA
+   ============================================ */
+.dashboard-main {
+  flex: 1;
+  min-width: 0;
+  margin-left: 0px;
+  margin-top: 60px;
+  padding: 24px 32px 36px;
+  background: #f0f4f0;
+  min-height: calc(100vh - 60px);
+  width: calc(100vw - 240px);
+}
+
+.dashboard-content {
+  width: 100%;
+  animation: fadeInUp 0.35s ease;
+}
+
+/* ============================================
+   TOP ROW  (Hero + Stats grid)
+   ============================================ */
+.top-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-bottom: 20px;
+  width: 100%;
+}
+
+/* --- Hero card --- */
+.hero-card {
+  background: linear-gradient(135deg, #1b5e20 0%, #2e7d32 55%, #388e3c 100%) !important;
+  border-radius: 18px !important;
+  overflow: hidden;
+  position: relative;
+  min-height: 300px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.hero-card-inner {
+  position: relative;
+  z-index: 1;
+  padding: 28px 28px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.hero-greeting {
+  font-size: 1.55rem !important;
+  font-weight: 900 !important;
+  color: #fff !important;
+  line-height: 1.3 !important;
+}
+.hero-role-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(255,255,255,0.15);
+  color: rgba(255,255,255,0.9);
+  border-radius: 20px;
+  padding: 4px 12px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  width: fit-content;
+}
+.hero-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(0,0,0,0.18);
+  border-radius: 12px;
+  padding: 8px 14px;
+}
+.hero-deco-circle {
+  position: absolute !important;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.06);
+  pointer-events: none;
+}
+
+/* --- Stats 2×2 grid --- */
+.stats-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 14px;
+}
+.stat-card {
+  border-radius: 16px !important;
+  border: 1px solid #e8f5e9 !important;
+  background: #fff !important;
+  transition: box-shadow 0.2s, transform 0.2s;
+}
+.stat-card:hover {
+  box-shadow: 0 6px 20px rgba(46,125,50,0.12) !important;
+  transform: translateY(-2px);
+}
+.stat-card-inner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+}
+.stat-icon-box {
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.stat-text { flex: 1; min-width: 0; }
+.stat-value {
+  font-size: 1.75rem !important;
+  font-weight: 900 !important;
+  line-height: 1 !important;
+}
+.stat-label {
+  font-size: 0.78rem !important;
+  font-weight: 700 !important;
+  color: #424242 !important;
+  margin-top: 2px !important;
+}
+.stat-desc {
+  font-size: 0.68rem !important;
+  color: #9e9e9e !important;
+}
+
+/* ============================================
+   MID ROW  (Env sensor + Log)
+   ============================================ */
+.mid-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-bottom: 20px;
+  width: 100%;
+}
+
+/* --- Env card --- */
+.env-card {
+  border-radius: 18px !important;
+  border: 1px solid #e8f5e9 !important;
+  background: #fff !important;
+  padding: 22px 22px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.env-card-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2px;
+}
+.env-card-sub {
+  font-size: 0.73rem !important;
+  color: #9e9e9e !important;
+  margin-bottom: 18px !important;
+}
+
+/* Sensor metric boxes */
+.sensor-metrics-row {
+  display: flex;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+.sensor-metric {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  border-radius: 14px;
+  padding: 16px 10px 12px;
+}
+.sensor-metric-temp  { background: #fff8f8; border: 1px solid #ffcdd2; }
+.sensor-metric-humid { background: #f0f8ff; border: 1px solid #bbdefb; }
+.sensor-metric-light { background: #fffde7; border: 1px solid #fff176; }
+
+.sensor-metric-icon { font-size: 28px !important; margin-bottom: 6px; }
+.sensor-metric-icon-temp  { color: #e53935 !important; }
+.sensor-metric-icon-humid { color: #1e88e5 !important; }
+.sensor-metric-icon-light { color: #f9a825 !important; }
+
+.sensor-metric-value { font-size: 1.5rem !important; font-weight: 900 !important; line-height: 1 !important; }
+.sensor-metric-value-temp  { color: #e53935 !important; }
+.sensor-metric-value-humid { color: #1e88e5 !important; }
+.sensor-metric-value-light { color: #f9a825 !important; }
+
+.sensor-metric-label { font-size: 0.7rem !important; color: #757575 !important; font-weight: 600 !important; margin-top: 4px !important; }
+
+/* Trend row */
+.sensor-trend-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #f5f5f5;
+  border-radius: 10px;
+  padding: 8px 12px;
+}
+.trend-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: #2e7d32;
+}
+.trend-item-warn { color: #e65100; }
+
+/* --- Log card --- */
+.log-card {
+  border-radius: 18px !important;
+  border: 1px solid #e8f5e9 !important;
+  background: #fff !important;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.log-card-header {
+  padding: 18px 20px 10px;
+  border-bottom: 1px solid #f5f5f5;
+}
+.log-scroll-area {
+  overflow-y: auto;
+  flex: 1;
+  padding: 8px 0;
+  max-height: 270px;
+}
+.log-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 9px 20px;
+  transition: background 0.15s;
+}
+.log-item:hover { background: #f9fbe7; }
+
+.log-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+.log-dot-error   { background: #e53935; box-shadow: 0 0 0 3px #ffcdd2; }
+.log-dot-success { background: #43a047; box-shadow: 0 0 0 3px #c8e6c9; }
+.log-dot-info    { background: #1e88e5; box-shadow: 0 0 0 3px #bbdefb; }
+.log-dot-warn    { background: #fb8c00; box-shadow: 0 0 0 3px #ffe0b2; }
+
+.log-item-msg  { font-size: 0.8rem !important; font-weight: 600 !important; color: #212121 !important; }
+.log-item-time { font-size: 0.68rem !important; color: #bdbdbd !important; }
+
+/* ============================================
+   ZONES SECTION
+   ============================================ */
+.zone-header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.zone-card {
+  width: 100%;
+  border-radius: 16px !important;
+  border: 1px solid #e8f5e9 !important;
+  background: #fff !important;
+  display: flex;
+  flex-direction: column;
+  transition: box-shadow 0.2s, transform 0.2s;
+}
+.zone-card:hover {
+  box-shadow: 0 8px 24px rgba(46,125,50,0.13) !important;
+  transform: translateY(-3px);
+}
+.zone-card-body { flex: 1; padding: 16px 16px 8px !important; }
+.zone-card-name {
+  font-size: 0.95rem !important;
+  font-weight: 800 !important;
+  color: #1b5e20 !important;
+  margin-bottom: 4px !important;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.zone-card-desc {
+  font-size: 0.78rem !important;
+  color: #757575 !important;
+  min-height: 36px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-bottom: 10px !important;
+}
+.zone-card-meta {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0 0;
+  border-top: 1px dashed #e0e0e0;
+}
+.zone-card-footer { padding: 8px 16px 14px !important; }
