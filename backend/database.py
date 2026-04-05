@@ -1,10 +1,18 @@
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+import os
+from dotenv import load_dotenv
+
+# Load biến môi trường từ file .env
+load_dotenv()
 
 # Thay đổi thông tin kết nối này theo PostgreSQL của bạn
 # Format: postgresql://<username>:<password>@<host>:<port>/<database_name>
-SQLALCHEMY_DATABASE_URL = "postgresql://postgres:27062005@localhost:5432/smart_farm_db"
+SQLALCHEMY_DATABASE_URL = os.getenv(
+    "DATABASE_URL", 
+    "postgresql://postgres:password@localhost:5432/smart_farm_db"
+)
 
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

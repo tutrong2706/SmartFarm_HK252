@@ -318,8 +318,8 @@ def get_all_devices(db: Session = Depends(get_db)):
     return result
 
 # Helper: Gửi lệnh điều khiển lên Adafruit IO
-AIO_USERNAME = os.getenv('ADAFRUIT_IO_USERNAME', "huy2211173")
-AIO_KEY      = os.getenv('ADAFRUIT_IO_KEY', "YOUR_ADAFRUIT_AIO_KEY")
+AIO_USERNAME = os.getenv('ADAFRUIT_IO_USERNAME', 'YOUR_ADAFRUIT_USERNAME')
+AIO_KEY      = os.getenv('ADAFRUIT_IO_KEY', 'YOUR_ADAFRUIT_AIO_KEY')
 
 def _publish_adafruit(feed_key: str, value: str):
     def run():

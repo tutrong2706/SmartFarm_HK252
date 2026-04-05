@@ -8,9 +8,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Config: Adafruit IO ---
-AIO_USERNAME = os.getenv('ADAFRUIT_IO_USERNAME', "tutrong2706")
-AIO_KEY      = os.getenv('ADAFRUIT_IO_KEY', "YOUR_ADAFRUIT_AIO_KEY")
-OWNER_USERNAME = os.getenv('OWNER_USERNAME', "huy2211173")
+# --- Config: Adafruit IO ---
+AIO_USERNAME = os.getenv('ADAFRUIT_IO_USERNAME', 'YOUR_ADAFRUIT_USERNAME')
+AIO_KEY      = os.getenv('ADAFRUIT_IO_KEY', 'YOUR_ADAFRUIT_AIO_KEY')
+OWNER_USERNAME = os.getenv('OWNER_USERNAME', 'YOUR_SECONDARY_ADAFRUIT_USERNAME')
 AIO_BROKER   = "io.adafruit.com"
 PORT         = 1883
 
