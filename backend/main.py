@@ -1,3 +1,6 @@
+import os
+import requests
+import threading
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -314,6 +317,21 @@ def get_all_devices(db: Session = Depends(get_db)):
         ))
     return result
 
+# Helper: Gửi lệnh điều khiển lên Adafruit IO
+AIO_USERNAME = os.getenv('ADAFRUIT_IO_USERNAME', 'YOUR_ADAFRUIT_USERNAME')
+AIO_KEY      = os.getenv('ADAFRUIT_IO_KEY', 'YOUR_ADAFRUIT_AIO_KEY')
+
+def _publish_adafruit(feed_key: str, value: str):
+    def run():
+        try:
+            url = f"https://io.adafruit.com/api/v2/{AIO_USERNAME}/feeds/{feed_key}/data"
+            headers = {"X-AIO-Key": AIO_KEY, "Content-Type": "application/json"}
+            payload = {"datum": {"value": value}}
+            requests.post(url, json=payload, headers=headers, timeout=5)
+        except Exception:
+            pass
+    threading.Thread(target=run, daemon=True).start()
+
 # 2. PATCH - Bật/tắt thiết bị
 @app.patch("/api/devices/{device_id}/toggle", response_model=schemas.DeviceResponse)
 def toggle_device(device_id: int, body: schemas.DeviceToggle, db: Session = Depends(get_db)):
@@ -326,13 +344,21 @@ def toggle_device(device_id: int, body: schemas.DeviceToggle, db: Session = Depe
     db.refresh(device)
     dtype = db.query(models.DeviceType).filter(models.DeviceType.id == device.type_id).first()
 
-    # ── Ghi log thao tác thủ công ──────────────────────────────────
+    # ── Ghi log thao tác thủ công & Publish MQTT ──────────────────
     if prev_state != body.is_active:
         action_word = "bật" if body.is_active else "tắt"
         zone_name   = None
         if device.zone_id:
             z = db.query(models.Zone).filter(models.Zone.id == device.zone_id).first()
             zone_name = z.name if z else None
+            
+        # NẾU thiết bị có pin map với Adafruit (VD: "AIO /dadn-fan") -> bắn API cho nó
+        if device.pin_connector and str(device.pin_connector).startswith("AIO /"):
+            feed_key = str(device.pin_connector).replace("AIO /", "").strip()
+            # Gửi "1" cho Bật (ON) và "0" cho Tắt (OFF)
+            str_val = "1" if body.is_active else "0"
+            _publish_adafruit(feed_key, str_val)
+
         log_event(db,
             log_type    = "system",
             severity    = "info",
@@ -640,7 +666,7 @@ def _build_log_response(log: models.AlertLog, db: Session) -> dict:
         "metric_key":       log.metric_key,
         "metric_value":     log.metric_value,
         "threshold":        log.threshold,
-        "created_at":       log.created_at,
+        "created_at":       log.created_at.isoformat() + "Z" if log.created_at else None,
         "zone_name":        zone_name,
         "device_name":      device_name,
     }
@@ -716,7 +742,7 @@ def log_event(
         "metric_value":   metric_value,
         "threshold":      threshold,
         "is_read":        False,
-        "created_at":     entry.created_at.isoformat(),
+        "created_at":     entry.created_at.isoformat() + "Z",
     }
     try:
         loop = asyncio.get_event_loop()

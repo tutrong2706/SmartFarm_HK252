@@ -1,9 +1,14 @@
 from passlib.context import CryptContext
 import jwt
 from datetime import datetime, timedelta
+import os
+from dotenv import load_dotenv
 
-# Cấu hình khóa bí mật cho JWT (Trong thực tế nên để trong file .env)
-SECRET_KEY = "smart_farm_secret_key_super_safe"
+# Load biến môi trường từ file .env
+load_dotenv()
+
+# Cấu hình khóa bí mật cho JWT (Lấy từ .env file)
+SECRET_KEY = os.getenv("SECRET_KEY", "your_secret_key_change_this_in_production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 # Token sống trong 60 phút
 

@@ -67,7 +67,10 @@ const LOG_TYPE_LABEL = {
 
 function relLogTime(isoString) {
   if (!isoString) return ''
-  const diff = Math.floor((Date.now() - new Date(isoString).getTime()) / 1000)
+  // Backend lưu UTC nhưng không có suffix Z → thêm vào để browser parse đúng
+  const normalized = isoString.endsWith('Z') || isoString.includes('+') ? isoString : isoString + 'Z'
+  const diff = Math.floor((Date.now() - new Date(normalized).getTime()) / 1000)
+  if (diff < 5)    return 'vừa xong'
   if (diff < 60)   return `${diff} giây trước`
   if (diff < 3600) return `${Math.floor(diff / 60)} phút trước`
   if (diff < 86400) return `${Math.floor(diff / 3600)} giờ trước`
