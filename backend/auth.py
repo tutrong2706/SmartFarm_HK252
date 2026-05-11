@@ -1,4 +1,4 @@
-from passlib.context import CryptContext
+
 import jwt
 from datetime import datetime, timedelta
 import os
@@ -12,16 +12,17 @@ SECRET_KEY = os.getenv("SECRET_KEY", "your_secret_key_change_this_in_production"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 # Token sống trong 60 phút
 
-# Cấu hình thuật toán băm mật khẩu
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+from pwdlib import PasswordHash
+from pwdlib.hashers.argon2 import Argon2Hasher
 
-# 1. Hàm băm mật khẩu
-def get_password_hash(password):
-    return pwd_context.hash(password)
+# Khởi tạo bộ băm mật khẩu mới thay thế cho passlib
+password_hash = PasswordHash((Argon2Hasher(),))
 
-# 2. Hàm kiểm tra mật khẩu
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return password_hash.verify(plain_password, hashed_password)
+
+def get_password_hash(password: str) -> str:
+    return password_hash.hash(password)
 
 # 3. Hàm tạo JWT Token
 def create_access_token(data: dict):
