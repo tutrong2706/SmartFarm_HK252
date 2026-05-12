@@ -539,9 +539,14 @@ export default function Dashboard() {
                                 boxShadow: `0 2px 6px ${style.color}55`,
                               }}
                               onClick={() => {
-                                if (log.action_type === 'navigate_zone' && log.zone_id)
+                                // Ưu tiên 1: nếu có zone_id → dẫn đến chi tiết khu vực
+                                if (log.zone_id)
                                   navigate(`/zones/${log.zone_id}`)
-                                else if (log.action_type === 'navigate_device' || log.action_type === 'toggle_device')
+                                // Ưu tiên 2: nếu có action_target_id → dẫn đến thiết bị
+                                else if (log.action_target_id)
+                                  navigate(`/device-management`)
+                                // Mặc định: trang quản lý thiết bị
+                                else
                                   navigate('/device-management')
                               }}>
                               {log.action_label}

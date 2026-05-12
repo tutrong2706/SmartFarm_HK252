@@ -34,6 +34,9 @@ class CropSettingCreate(BaseModel):
     temp_max: float
     humid_min: float
     humid_max: float
+    light_min: Optional[float] = None
+    light_max: Optional[float] = None
+    light_type: Optional[str] = None   # "SUN" hoặc "SHADE"
     auto_mode: bool = False
 
 class CropSettingResponse(BaseModel):
@@ -43,6 +46,9 @@ class CropSettingResponse(BaseModel):
     temp_max: float
     humid_min: float
     humid_max: float
+    light_min: Optional[float] = None
+    light_max: Optional[float] = None
+    light_type: Optional[str] = None
     auto_mode: bool
 
     class Config:

@@ -13,6 +13,9 @@ class CropSetting(Base):
     temp_max = Column(Float)
     humid_min = Column(Float)
     humid_max = Column(Float)
+    light_min = Column(Float, nullable=True)   # Ngưỡng độ sáng tối thiểu (Lux)
+    light_max = Column(Float, nullable=True)   # Ngưỡng độ sáng tối đa (Lux)
+    light_type = Column(String, nullable=True) # "SUN" = Cây ưa nắng, "SHADE" = Cây ưa bóng
     auto_mode = Column(Boolean, default=False) # Cho phép hệ thống tự động chạy
     
     # Mối quan hệ 1-N với Zone (1 Cấu hình có thể dùng cho nhiều Khu vực)
