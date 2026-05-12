@@ -21,6 +21,31 @@ models.Base.metadata.create_all(bind=engine)
 db = SessionLocal()
 
 # ─────────────────────────────────────────────────────────────────
+# 0. ZONES  (cần tạo zones trước devices vì foreign key)
+# ─────────────────────────────────────────────────────────────────
+zones_data = [
+    {"name": "Vườn Táo",    "description": "Khu vực trồng táo",   "crop_setting_id": None},
+    {"name": "Vườn Nho",    "description": "Khu vực trồng nho",   "crop_setting_id": None},
+    {"name": "Vườn Đào",    "description": "Khu vực trồng đào",   "crop_setting_id": None},
+    {"name": "Vườn Dưa Hấu","description": "Khu vực trồng dưa hấu","crop_setting_id": None},
+]
+
+print("── Thêm Zone ──")
+zone_id_map = {}
+for i, z_data in enumerate(zones_data, start=1):
+    existing = db.query(models.Zone).filter_by(name=z_data["name"]).first()
+    if existing:
+        zone_id_map[i] = existing.id
+        print(f"  ✓ Đã tồn tại: {z_data['name']} (id={existing.id})")
+    else:
+        zone = models.Zone(**z_data)
+        db.add(zone)
+        db.flush()
+        zone_id_map[i] = zone.id
+        print(f"  + Thêm mới:   {z_data['name']} (id={zone.id})")
+db.commit()
+
+# ─────────────────────────────────────────────────────────────────
 # 1. DEVICE TYPES
 # ─────────────────────────────────────────────────────────────────
 device_types_data = [
@@ -215,6 +240,9 @@ crop_settings_data = [
         "temp_max":  26.0,
         "humid_min": 50.0,
         "humid_max": 70.0,
+        "light_min": 15000.0,
+        "light_max": 35000.0,
+        "light_type": "SUN",
         "auto_mode": True,
     },
     {
@@ -223,6 +251,9 @@ crop_settings_data = [
         "temp_max":  30.0,
         "humid_min": 55.0,
         "humid_max": 75.0,
+        "light_min": 15000.0,
+        "light_max": 35000.0,
+        "light_type": "SUN",
         "auto_mode": True,
     },
     {
@@ -231,6 +262,9 @@ crop_settings_data = [
         "temp_max":  24.0,
         "humid_min": 45.0,
         "humid_max": 65.0,
+        "light_min": 5000.0,
+        "light_max": 12000.0,
+        "light_type": "SHADE",
         "auto_mode": False,
     },
     {
@@ -239,6 +273,9 @@ crop_settings_data = [
         "temp_max":  35.0,
         "humid_min": 60.0,
         "humid_max": 80.0,
+        "light_min": 15000.0,
+        "light_max": 35000.0,
+        "light_type": "SUN",
         "auto_mode": True,
     },
 ]
@@ -268,10 +305,11 @@ alert_logs_data = [
         "title":            "Nhiệt độ vượt ngưỡng an toàn",
         "message":          "⚠️ Nhiệt độ Vườn Táo đã vượt mốc 35°C (Ngưỡng tối đa: 26°C). Nguy cơ héo lá!",
         "actor":            "SYSTEM",
+        "zone_id":          1,
         "metric_key":       "temperature",
         "metric_value":     36.4,
         "threshold":        26.0,
-        "action_label":     "Bật quạt giải nhiệt ngay",
+        "action_label":     "Bật quạt giải nhiệt",
         "action_type":      "toggle_device",
         "is_read":          False,
         "created_at":       datetime.utcnow() - timedelta(minutes=3),
@@ -282,10 +320,52 @@ alert_logs_data = [
         "title":            "Cảm biến độ ẩm đất mất kết nối",
         "message":          "🔴 Cảm biến Soil Moisture tại Vườn Dưa hấu offline quá 10 phút. Không thể giám sát độ ẩm đất.",
         "actor":            "SYSTEM",
-        "action_label":     "Kiểm tra thiết bị",
-        "action_type":      "navigate_device",
+        "zone_id":          4,
+        "action_label":     "Kiểm tra Vườn Dưa Hấu",
+        "action_type":      "navigate_zone",
         "is_read":          False,
         "created_at":       datetime.utcnow() - timedelta(minutes=11),
+    },
+    {
+        "log_type":         "critical",
+        "severity":         "critical",
+        "title":            "Độ ẩm đất vượt ngưỡng tối đa",
+        "message":          "💧 Độ ẩm đất Vườn Nho đạt 82% (Ngưỡng tối đa: 75%). Nguy cơ úng rễ! Cần thoát nước ngay.",
+        "actor":            "SYSTEM",
+        "zone_id":          2,
+        "metric_key":       "humidity",
+        "metric_value":     82.0,
+        "threshold":        75.0,
+        "action_label":     "Bật van thoát nước",
+        "action_type":      "navigate_zone",
+        "is_read":          False,
+        "created_at":       datetime.utcnow() - timedelta(minutes=7),
+    },
+    {
+        "log_type":         "critical",
+        "severity":         "critical",
+        "title":            "CO2 vượt ngưỡng nguy hiểm",
+        "message":          "🌫️ Nồng độ CO2 tại Vườn Nho đạt 1.200ppm (Ngưỡng tối đa: 800ppm). Cần thông gió gấp!",
+        "actor":            "SYSTEM",
+        "zone_id":          2,
+        "metric_key":       "light",
+        "metric_value":     1200.0,
+        "threshold":        800.0,
+        "action_label":     "Bật quạt thông gió",
+        "action_type":      "navigate_zone",
+        "is_read":          False,
+        "created_at":       datetime.utcnow() - timedelta(minutes=15),
+    },
+    {
+        "log_type":         "critical",
+        "severity":         "critical",
+        "title":            "Gateway mất kết nối",
+        "message":          "📡 Cổng IoT Gateway không phản hồi từ 5 phút trước. Toàn bộ cảm biến ngừng gửi dữ liệu!",
+        "actor":            "SYSTEM",
+        "action_label":     "Kiểm tra Gateway",
+        "action_type":      "navigate_zone",
+        "is_read":          False,
+        "created_at":       datetime.utcnow() - timedelta(minutes=5),
     },
     # ── warning ───────────────────────────────────────────────────
     {
@@ -294,6 +374,7 @@ alert_logs_data = [
         "title":            "Độ ẩm đất tiệm cận ngưỡng tối thiểu",
         "message":          "Độ ẩm đất Vườn Dưa hấu đang giảm nhanh, hiện ở mức 52% (Ngưỡng tối thiểu: 60%). Cần tưới sớm.",
         "actor":            "SYSTEM",
+        "zone_id":          4,
         "metric_key":       "humidity",
         "metric_value":     52.0,
         "threshold":        60.0,
@@ -305,21 +386,76 @@ alert_logs_data = [
     {
         "log_type":         "warning",
         "severity":         "warning",
-        "title":            "Máy bơm hoạt động liên tục quá lâu",
-        "message":          "Pump 1 đã hoạt động liên tục hơn 2 giờ. Cần kiểm tra để tránh quá tải động cơ.",
+        "title":            "Ánh sáng vượt ngưỡng cho phép",
+        "message":          "☀️ Cường độ ánh sáng Vườn Đào đạt 45.000 Lux (Ngưỡng tối đa: 12.000 Lux - Cây ưa bóng). Nguy cơ cháy lá!",
         "actor":            "SYSTEM",
-        "action_label":     "Xem thiết bị",
-        "action_type":      "navigate_device",
+        "zone_id":          3,
+        "metric_key":       "light",
+        "metric_value":     45000.0,
+        "threshold":        12000.0,
+        "action_label":     "Bật lưới che nắng",
+        "action_type":      "navigate_zone",
+        "is_read":          False,
+        "created_at":       datetime.utcnow() - timedelta(minutes=5),
+    },
+    {
+        "log_type":         "warning",
+        "severity":         "warning",
+        "title":            "Máy bơm hoạt động liên tục quá lâu",
+        "message":          "Pump 1 tại Vườn Táo đã hoạt động liên tục hơn 2 giờ. Cần kiểm tra để tránh quá tải động cơ.",
+        "actor":            "SYSTEM",
+        "zone_id":          1,
+        "action_label":     "Xem Vườn Táo",
+        "action_type":      "navigate_zone",
         "is_read":          True,
         "created_at":       datetime.utcnow() - timedelta(hours=2, minutes=5),
+    },
+    {
+        "log_type":         "warning",
+        "severity":         "warning",
+        "title":            "Nhiệt độ tiệm cận ngưỡng tối đa",
+        "message":          "🌡️ Nhiệt độ Vườn Nho đang ở 28°C (Ngưỡng tối đa: 30°C). Cần theo dõi sát.",
+        "actor":            "SYSTEM",
+        "zone_id":          2,
+        "metric_key":       "temperature",
+        "metric_value":     28.0,
+        "threshold":        30.0,
+        "action_label":     "Theo dõi nhiệt độ",
+        "action_type":      "navigate_zone",
+        "is_read":          False,
+        "created_at":       datetime.utcnow() - timedelta(minutes=20),
+    },
+    {
+        "log_type":         "warning",
+        "severity":         "warning",
+        "title":            "Pin cảm biến yếu",
+        "message":          "🔋 Cảm biến Soil Moisture tại Vườn Táo có pin chỉ còn 15%. Cần thay pin sớm.",
+        "actor":            "SYSTEM",
+        "zone_id":          1,
+        "action_label":     "Thay pin",
+        "action_type":      "navigate_zone",
+        "is_read":          False,
+        "created_at":       datetime.utcnow() - timedelta(hours=1),
+    },
+    {
+        "log_type":         "warning",
+        "severity":         "warning",
+        "title":            "Bể nước sắp cạn",
+        "message":          "💧 Mực nước bể chứa dưới 20%. Cần bơm bổ sung để đảm bảo tưới tiêu cho các khu vực.",
+        "actor":            "SYSTEM",
+        "action_label":     "Kiểm tra bể nước",
+        "action_type":      "navigate_zone",
+        "is_read":          False,
+        "created_at":       datetime.utcnow() - timedelta(minutes=45),
     },
     # ── automation ────────────────────────────────────────────────
     {
         "log_type":         "automation",
         "severity":         "success",
         "title":            "Máy bơm tự động bật",
-        "message":          "💧 Hệ thống đã tự động bật Pump 1 tại Vườn Táo do độ ẩm đất thấp hơn ngưỡng (48%).",
+        "message":          "💧 Hệ thống đã tự động bật Pump tại Vườn Táo do độ ẩm đất thấp hơn ngưỡng (48%).",
         "actor":            "SYSTEM",
+        "zone_id":          1,
         "metric_key":       "humidity",
         "metric_value":     48.0,
         "threshold":        50.0,
@@ -330,7 +466,7 @@ alert_logs_data = [
         "log_type":         "automation",
         "severity":         "info",
         "title":            "Đèn LED tắt theo lịch",
-        "message":          "🕒 Đèn NeoPixel LED Khu ươm mầm đã được tắt tự động theo lịch trình (18:00).",
+        "message":          "🕒 Đèn LED tổng đã được tắt tự động theo lịch trình (18:00).",
         "actor":            "SYSTEM",
         "is_read":          True,
         "created_at":       datetime.utcnow() - timedelta(hours=1),
@@ -349,10 +485,11 @@ alert_logs_data = [
         "log_type":         "system",
         "severity":         "info",
         "title":            "Thao tác thủ công thiết bị",
-        "message":          "Người dùng 'Nông dân A' vừa bật Pump 2 bằng tay từ trang Quản lý thiết bị.",
+        "message":          "Người dùng 'Nông dân A' vừa bật máy bơm tại Vườn Nho bằng tay từ trang quản lý.",
         "actor":            "Nông dân A",
-        "action_label":     "Xem lịch sử",
-        "action_type":      "navigate_device",
+        "zone_id":          2,
+        "action_label":     "Xem Vườn Nho",
+        "action_type":      "navigate_zone",
         "is_read":          True,
         "created_at":       datetime.utcnow() - timedelta(hours=4),
     },
@@ -371,6 +508,7 @@ else:
             title            = log_data["title"],
             message          = log_data["message"],
             actor            = log_data.get("actor"),
+            zone_id          = log_data.get("zone_id"),
             metric_key       = log_data.get("metric_key"),
             metric_value     = log_data.get("metric_value"),
             threshold        = log_data.get("threshold"),

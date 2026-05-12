@@ -1,4 +1,4 @@
-﻿import { useState, useEffect } from 'react'
+import { useState, useEffect } from 'react'
 import axios from 'axios'
 import {
   ThemeProvider, createTheme, CssBaseline,
@@ -6,7 +6,7 @@ import {
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
   Dialog, DialogTitle, DialogContent, DialogActions,
   TextField, Grid, Chip, IconButton, Switch, Stack,
-  CircularProgress, Snackbar, Alert
+  CircularProgress, Snackbar, Alert, MenuItem, Select, FormControl, InputLabel
 } from '@mui/material'
 
 import AppShell             from './AppShell'
@@ -16,6 +16,7 @@ import EditIcon             from '@mui/icons-material/Edit'
 import DeleteIcon           from '@mui/icons-material/Delete'
 import DeviceThermostatIcon from '@mui/icons-material/DeviceThermostat'
 import WaterDropIcon        from '@mui/icons-material/WaterDrop'
+import WbSunnyIcon          from '@mui/icons-material/WbSunny'
 import AutoModeIcon         from '@mui/icons-material/AutoMode'
 import LocalFloristIcon     from '@mui/icons-material/LocalFlorist'
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline'
@@ -34,8 +35,17 @@ const farmTheme = createTheme({
 
 const EMPTY_FORM = {
   crop_name: '', temp_min: '', temp_max: '',
-  humid_min: '', humid_max: '', auto_mode: true
+  humid_min: '', humid_max: '',
+  light_min: '', light_max: '', light_type: 'SUN',
+  auto_mode: true
 }
+
+const LIGHT_OPTIONS = [
+  { value: 'SUN',   label: '☀️ Cây ưa nắng',   min: 15000, max: 35000 },
+  { value: 'SHADE', label: '🌥️ Cây ưa bóng',   min: 5000,  max: 12000 },
+]
+
+const LIGHT_LABELS = { SUN: '☀️ Ưa nắng', SHADE: '🌥️ Ưa bóng' }
 
 export default function CropSettings() {
   const [crops,    setCrops]    = useState([])
@@ -66,6 +76,17 @@ export default function CropSettings() {
   const handleChange = (e) =>
     setFormData({ ...formData, [e.target.name]: e.target.value })
 
+  const handleLightTypeChange = (e) => {
+    const val = e.target.value
+    const opt = LIGHT_OPTIONS.find(o => o.value === val)
+    setFormData({
+      ...formData,
+      light_type: val,
+      light_min:  opt ? opt.min : '',
+      light_max:  opt ? opt.max : '',
+    })
+  }
+
   const openAdd = () => { setEditId(null); setFormData(EMPTY_FORM); setOpen(true) }
 
   const openEdit = (crop) => {
@@ -76,6 +97,9 @@ export default function CropSettings() {
       temp_max:  crop.temp_max,
       humid_min: crop.humid_min,
       humid_max: crop.humid_max,
+      light_min: crop.light_min ?? '',
+      light_max: crop.light_max ?? '',
+      light_type: crop.light_type ?? 'SUN',
       auto_mode: crop.auto_mode,
     })
     setOpen(true)
@@ -94,6 +118,8 @@ export default function CropSettings() {
         temp_max:  parseFloat(formData.temp_max),
         humid_min: parseFloat(formData.humid_min),
         humid_max: parseFloat(formData.humid_max),
+        light_min: formData.light_min ? parseFloat(formData.light_min) : null,
+        light_max: formData.light_max ? parseFloat(formData.light_max) : null,
       }
       if (editId) {
         await axios.put(`${API}/api/crop-settings/${editId}`, payload)
@@ -245,10 +271,10 @@ export default function CropSettings() {
               </Box>
             ) : (
               <TableContainer sx={{ maxHeight: 520 }}>
-                <Table stickyHeader sx={{ minWidth: 900 }}>
+                <Table stickyHeader sx={{ minWidth: 1100 }}>
                   <TableHead>
                     <TableRow>
-                      {['ID', 'Tên nông sản', 'Ngưỡng Nhiệt độ (°C)', 'Ngưỡng Độ ẩm (%)', 'Tự động', 'Thao tác'].map(h => (
+                      {['ID', 'Tên nông sản', 'Ngưỡng Nhiệt độ (°C)', 'Ngưỡng Độ ẩm (%)', 'Ngưỡng Ánh sáng (Lux)', 'Tự động', 'Thao tác'].map(h => (
                         <TableCell key={h}
                           sx={{ fontWeight: 800, bgcolor: '#f1f8e9', color: '#1b5e20',
                             fontSize: '0.78rem', py: 1.5, whiteSpace: 'nowrap' }}>
@@ -289,6 +315,23 @@ export default function CropSettings() {
                             sx={{ bgcolor: '#e3f2fd', color: '#1565c0', fontWeight: 700,
                               border: '1px solid #90caf9', fontSize: '0.78rem' }}
                           />
+                        </TableCell>
+                        <TableCell align="center">
+                          {crop.light_min != null ? (
+                            <Chip
+                              icon={<WbSunnyIcon fontSize="small" />}
+                              label={`${crop.light_min?.toLocaleString()} – ${crop.light_max?.toLocaleString()}`}
+                              sx={{ bgcolor: '#fff8e1', color: '#f57f17', fontWeight: 700,
+                                border: '1px solid #ffe082', fontSize: '0.72rem' }}
+                            />
+                          ) : (
+                            <Typography variant="caption" color="text.disabled">—</Typography>
+                          )}
+                          {crop.light_type && (
+                            <Typography variant="caption" display="block" color="text.secondary" sx={{ mt: 0.3, fontSize: '0.7rem' }}>
+                              {LIGHT_LABELS[crop.light_type] || crop.light_type}
+                            </Typography>
+                          )}
                         </TableCell>
                         <TableCell align="center">
                           <Switch
@@ -343,6 +386,32 @@ export default function CropSettings() {
               <TextField fullWidth size="small" label="Độ ẩm max (%)"
                 name="humid_max" value={formData.humid_max} onChange={handleChange} type="number" />
             </Grid>
+
+            {/* ── Ánh sáng ── */}
+            <Grid item xs={12}>
+              <FormControl fullWidth size="small">
+                <InputLabel>Loại cây theo ánh sáng</InputLabel>
+                <Select
+                  name="light_type"
+                  value={formData.light_type || 'SUN'}
+                  label="Loại cây theo ánh sáng"
+                  onChange={handleLightTypeChange}
+                >
+                  {LIGHT_OPTIONS.map(opt => (
+                    <MenuItem key={opt.value} value={opt.value}>{opt.label}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Grid>
+            <Grid item xs={6}>
+              <TextField fullWidth size="small" label="Ánh sáng min (Lux)"
+                name="light_min" value={formData.light_min} onChange={handleChange} type="number" />
+            </Grid>
+            <Grid item xs={6}>
+              <TextField fullWidth size="small" label="Ánh sáng max (Lux)"
+                name="light_max" value={formData.light_max} onChange={handleChange} type="number" />
+            </Grid>
+
             <Grid item xs={12}>
               <Stack direction="row" spacing={1.5} alignItems="center">
                 <Switch checked={formData.auto_mode} color="success"

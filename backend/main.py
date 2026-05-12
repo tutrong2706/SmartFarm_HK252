@@ -254,6 +254,9 @@ def update_crop_setting(crop_id: int, crop_data: schemas.CropSettingCreate, db: 
     if crop is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy cấu hình cây trồng")
 
+    old_auto_mode = crop.auto_mode
+    new_auto_mode = crop_data.auto_mode
+
     # ── Ghi log các thay đổi ngưỡng ──────────────────────────────
     changes = []
     new_vals = crop_data.model_dump()
@@ -278,6 +281,85 @@ def update_crop_setting(crop_id: int, crop_data: schemas.CropSettingCreate, db: 
             message  = f"Admin vừa cập nhật ngưỡng '{crop.crop_name}': " + "; ".join(changes) + ".",
             actor    = "Admin",
         )
+
+    # ── Nếu bật auto_mode, chạy automation ngay lập tức dựa trên telemetry cuối cùng ──
+    if not old_auto_mode and new_auto_mode:
+        zones = db.query(models.Zone).filter(models.Zone.crop_setting_id == crop_id).all()
+        for zone in zones:
+            if zone.id in _last_telemetry:
+                telemetry = _last_telemetry[zone.id]
+                temp = telemetry.get("temperature")
+                humid = telemetry.get("humidity")
+                light = telemetry.get("light")
+                
+                # Chạy logic automation tương tự như trong telemetry endpoint
+                def _find_actuator(type_name: str):
+                    for dev in zone.devices:
+                        dt = db.query(models.DeviceType).filter(models.DeviceType.id == dev.type_id).first()
+                        if dt and dt.category == "ACTUATOR" and type_name.lower() in dt.name.lower():
+                            return dev
+                    return None
+
+                def _auto_set(device, target_active: bool, action_desc: str):
+                    if device is None:
+                        return
+                    if device.is_active == target_active:
+                        return
+                    device.is_active = target_active
+                    if device.pin_connector and str(device.pin_connector).startswith("AIO /"):
+                        feed_key = str(device.pin_connector).replace("AIO /", "").strip()
+                        str_val = "1" if target_active else "0"
+                        _publish_adafruit(feed_key, str_val)
+                    log_event(db,
+                        log_type    = "automation",
+                        severity    = "success",
+                        title       = f"{'Bật' if target_active else 'Tắt'} tự động — {device.name}",
+                        message     = (f"🔄 Hệ thống tự động {action_desc} tại {zone.name} "
+                                       f"({device.name})."),
+                        zone_id     = zone.id,
+                        device_id   = device.id,
+                        actor       = "SYSTEM",
+                    )
+
+                if temp is not None:
+                    if temp > crop.temp_max:
+                        fan = _find_actuator("quạt")
+                        _auto_set(fan, True, "bật quạt thông gió để hạ nhiệt độ")
+                    elif temp < crop.temp_min:
+                        fan = _find_actuator("quạt")
+                        _auto_set(fan, False, "tắt quạt thông gió do nhiệt độ đã hạ")
+                    else:
+                        fan = _find_actuator("quạt")
+                        _auto_set(fan, False, "tắt quạt thông gió — nhiệt độ đã ổn định")
+
+                if humid is not None:
+                    if humid < crop.humid_min:
+                        pump = _find_actuator("bơm")
+                        _auto_set(pump, True, "bật máy bơm tưới do độ ẩm thấp")
+                    elif humid > crop.humid_max:
+                        pump = _find_actuator("bơm")
+                        _auto_set(pump, False, "tắt máy bơm — độ ẩm đã đạt ngưỡng")
+                        relay = _find_actuator("relay")
+                        _auto_set(relay, True, "bật van thoát nước do độ ẩm quá cao")
+                    else:
+                        pump = _find_actuator("bơm")
+                        _auto_set(pump, False, "tắt máy bơm — độ ẩm đã ổn định")
+                        relay = _find_actuator("relay")
+                        _auto_set(relay, False, "tắt van thoát nước")
+
+                if light is not None and crop.light_min is not None and crop.light_max is not None:
+                    if light > crop.light_max:
+                        led = _find_actuator("led")
+                        _auto_set(led, False, "tắt đèn LED do ánh sáng vượt ngưỡng")
+                        rly = _find_actuator("relay")
+                        _auto_set(rly, True, "bật lưới che nắng do ánh sáng vượt ngưỡng")
+                    elif light < crop.light_min:
+                        led = _find_actuator("led")
+                        _auto_set(led, True, "bật đèn LED bổ sung do ánh sáng yếu")
+                    else:
+                        rly = _find_actuator("relay")
+                        _auto_set(rly, False, "tắt lưới che nắng — ánh sáng đã ổn định")
+        db.commit()
 
     for field, value in new_vals.items():
         setattr(crop, field, value)
@@ -511,6 +593,7 @@ async def receive_telemetry(data: dict, db: Session = Depends(get_db)):
         if crop:
             temp  = data.get("temperature")
             humid = data.get("humidity")
+            light = data.get("light")
             now   = datetime.now(timezone.utc)
 
             def _can_log(metric: str, kind: str) -> bool:
@@ -521,6 +604,36 @@ async def receive_telemetry(data: dict, db: Session = Depends(get_db)):
                     return False
                 _alert_cooldown[key] = now
                 return True
+
+            # ── Helper: tìm actuator trong zone theo type name ──────────────
+            def _find_actuator(type_name: str):
+                """Tìm thiết bị trong zone có DeviceType.name chứa type_name."""
+                for dev in zone.devices:
+                    dt = db.query(models.DeviceType).filter(models.DeviceType.id == dev.type_id).first()
+                    if dt and dt.category == "ACTUATOR" and type_name.lower() in dt.name.lower():
+                        return dev
+                return None
+
+            # ── Helper: tự động bật/tắt actuator ───────────────────────────
+            def _auto_set(device, target_active: bool, action_desc: str):
+                """Nếu auto_mode bật, tự động bật/tắt thiết bị và ghi log automation."""
+                if device is None:
+                    return
+                if device.is_active == target_active:
+                    return  # Đã đúng trạng thái rồi
+                device.is_active = target_active
+                db.commit()
+                db.refresh(device)
+                log_event(db,
+                    log_type    = "automation",
+                    severity    = "success",
+                    title       = f"{'Bật' if target_active else 'Tắt'} tự động — {device.name}",
+                    message     = (f"🔄 Hệ thống tự động {action_desc} tại {zone.name} "
+                                   f"({device.name})."),
+                    zone_id     = zone_id,
+                    device_id   = device.id,
+                    actor       = "SYSTEM",
+                )
 
             if temp is not None:
                 if temp > crop.temp_max:
@@ -538,6 +651,10 @@ async def receive_telemetry(data: dict, db: Session = Depends(get_db)):
                             action_label= "Bật quạt giải nhiệt ngay",
                             action_type = "toggle_device",
                         )
+                    # Auto: bật quạt nếu auto_mode
+                    if crop.auto_mode:
+                        fan = _find_actuator("quạt")
+                        _auto_set(fan, True, "bật quạt thông gió để hạ nhiệt độ")
                 elif temp > crop.temp_max * 0.93:
                     if _can_log("temperature", "warning"):
                         log_event(db,
@@ -551,10 +668,19 @@ async def receive_telemetry(data: dict, db: Session = Depends(get_db)):
                             metric_value= float(temp),
                             threshold   = float(crop.temp_max),
                         )
+                elif temp < crop.temp_min:
+                    # Auto: tắt quạt nếu nhiệt độ thấp hơn ngưỡng min
+                    if crop.auto_mode:
+                        fan = _find_actuator("quạt")
+                        _auto_set(fan, False, "tắt quạt thông gió do nhiệt độ đã hạ")
                 else:
-                    # Đã trở về bình thường — xoá cooldown để lần tới log lại ngay
+                    # Đã trở về bình thường — xoá cooldown
                     _alert_cooldown.pop((zone_id, "temperature", "critical"), None)
                     _alert_cooldown.pop((zone_id, "temperature", "warning"),  None)
+                    # Auto: tắt quạt nếu nhiệt độ trong ngưỡng và quạt đang bật
+                    if crop.auto_mode:
+                        fan = _find_actuator("quạt")
+                        _auto_set(fan, False, "tắt quạt thông gió — nhiệt độ đã ổn định")
 
             if humid is not None:
                 if humid < crop.humid_min:
@@ -572,6 +698,10 @@ async def receive_telemetry(data: dict, db: Session = Depends(get_db)):
                             action_label= "Bật bơm tưới ngay",
                             action_type = "toggle_device",
                         )
+                    # Auto: bật bơm nếu auto_mode
+                    if crop.auto_mode:
+                        pump = _find_actuator("bơm")
+                        _auto_set(pump, True, "bật máy bơm tưới do độ ẩm thấp")
                 elif humid < crop.humid_min * 1.05:
                     if _can_log("humidity", "warning"):
                         log_event(db,
@@ -587,9 +717,54 @@ async def receive_telemetry(data: dict, db: Session = Depends(get_db)):
                             action_label= "Bật bơm tưới",
                             action_type = "toggle_device",
                         )
+                elif humid > crop.humid_max:
+                    if _can_log("humidity", "humid_high"):
+                        log_event(db,
+                            log_type    = "warning",
+                            severity    = "warning",
+                            title       = f"Độ ẩm vượt ngưỡng — {zone.name}",
+                            message     = (f"💧 Độ ẩm {zone.name} đạt {humid}% "
+                                           f"(Ngưỡng tối đa: {crop.humid_max}%). Nguy cơ úng rễ!"),
+                            zone_id     = zone_id,
+                            metric_key  = "humidity",
+                            metric_value= float(humid),
+                            threshold   = float(crop.humid_max),
+                        )
+                    # Auto: tắt bơm nếu độ ẩm vượt ngưỡng max
+                    if crop.auto_mode:
+                        pump = _find_actuator("bơm")
+                        _auto_set(pump, False, "tắt máy bơm — độ ẩm đã đạt ngưỡng")
+                        relay = _find_actuator("relay")
+                        _auto_set(relay, True, "bật van thoát nước do độ ẩm quá cao")
                 else:
                     _alert_cooldown.pop((zone_id, "humidity", "critical"), None)
                     _alert_cooldown.pop((zone_id, "humidity", "warning"),  None)
+                    # Auto: tắt bơm nếu độ ẩm đã ổn
+                    if crop.auto_mode:
+                        pump = _find_actuator("bơm")
+                        _auto_set(pump, False, "tắt máy bơm — độ ẩm đã ổn định")
+                        relay = _find_actuator("relay")
+                        _auto_set(relay, False, "tắt van thoát nước")
+
+            # ── Auto điều khiển theo ngưỡng ánh sáng ────────────────────
+            if light is not None and crop.light_min is not None and crop.light_max is not None:
+                if light > crop.light_max:
+                    # Auto: tắt đèn LED / bật relay (lưới che) nếu quá sáng
+                    if crop.auto_mode:
+                        led = _find_actuator("led")
+                        _auto_set(led, False, "tắt đèn LED do ánh sáng vượt ngưỡng")
+                        rly = _find_actuator("relay")
+                        _auto_set(rly, True, "bật lưới che nắng do ánh sáng vượt ngưỡng")
+                elif light < crop.light_min:
+                    # Auto: bật đèn LED nếu thiếu sáng
+                    if crop.auto_mode:
+                        led = _find_actuator("led")
+                        _auto_set(led, True, "bật đèn LED bổ sung do ánh sáng yếu")
+                else:
+                    # Ánh sáng trong ngưỡng → tắt relay/lưới che
+                    if crop.auto_mode:
+                        rly = _find_actuator("relay")
+                        _auto_set(rly, False, "tắt lưới che nắng — ánh sáng đã ổn định")
 
     # Broadcast cho tất cả frontend đang mở
     await manager.broadcast(data)
