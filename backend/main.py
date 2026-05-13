@@ -1,19 +1,115 @@
 import os
+import csv
+import io
+import uuid
+import json
 import requests
 import threading
-from fastapi import FastAPI, Depends, HTTPException, Query
+from pathlib import Path
+from functools import wraps
+from fastapi import FastAPI, Depends, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse, JSONResponse
 from sqlalchemy.orm import Session
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi import WebSocket, WebSocketDisconnect
-from typing import List, Optional
-from datetime import datetime, timezone
+from typing import List, Optional, Literal
+from datetime import datetime, timezone, timedelta
 import auth
 import models, schemas
 from database import engine, get_db
 
+# ── Phase 4: Bổ sung ──────────────────────────────────────────────
+try:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        SimpleDocTemplate, Table, TableStyle, Paragraph,
+        Spacer, PageBreak, Image, KeepTogether
+    )
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    HAS_REPORTLAB = True
+except ImportError:
+    HAS_REPORTLAB = False
+
+# Register Unicode font for Vietnamese support
+def _register_unicode_font():
+    """Register a Unicode font for Vietnamese character support."""
+    import os
+    # Try common Unicode fonts in order of preference
+    # Segoe UI has the best Unicode support for Vietnamese on Windows
+    font_paths = [
+        # Segoe UI (best Unicode support for Vietnamese on Windows)
+        "C:/Windows/Fonts/segoeui.ttf",
+        "C:/Windows/Fonts/segoeui.ttf",  # Fallback duplicate
+        # DejaVu Sans (commonly available on Linux/Windows)
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/times.ttf",
+        "/System/Library/Fonts/SFNS.ttf",  # macOS
+    ]
+    
+    # Also try bold variants
+    bold_font_paths = [
+        "C:/Windows/Fonts/segoeuib.ttf",  # Segoe UI Bold
+        "C:/Windows/Fonts/segoeuib.ttf",  # Fallback duplicate
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+        "C:/Windows/Fonts/arialbd.ttf",
+        "C:/Windows/Fonts/timesbd.ttf",
+    ]
+    
+    for font_path in font_paths:
+        if os.path.exists(font_path):
+            try:
+                pdfmetrics.registerFont(TTFont('Unicode', font_path))
+                # Try to register bold variant
+                for bold_path in bold_font_paths:
+                    if os.path.exists(bold_path):
+                        try:
+                            pdfmetrics.registerFont(TTFont('Unicode-Bold', bold_path))
+                        except Exception:
+                            pass
+                        break
+                return 'Unicode'
+            except Exception:
+                continue
+    
+    # If no font found, return default (will have issues with Vietnamese)
+    return 'Helvetica'
+
+# Register font at module load
+UNICODE_FONT = _register_unicode_font() if HAS_REPORTLAB else 'Helvetica'
+UNICODE_FONT_BOLD = 'Unicode-Bold' if UNICODE_FONT == 'Unicode' else 'Helvetica-Bold'
+
+try:
+    import redis
+    REDIS_CLIENT = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+    REDIS_AVAILABLE = True
+except Exception:
+    REDIS_CLIENT = None
+    REDIS_AVAILABLE = False
+
+try:
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from apscheduler.triggers.cron import CronTrigger
+    APSCHEDULER_AVAILABLE = True
+except ImportError:
+    APSCHEDULER_AVAILABLE = False
+
+_report_scheduler = None
+
 # Lệnh này yêu cầu SQLAlchemy tạo toàn bộ các bảng trong CSDL
 models.Base.metadata.create_all(bind=engine)
+
+# Thư mục lưu file báo cáo
+REPORTS_DIR = Path(__file__).parent / "reports"
+REPORTS_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(
     title="Smart Farm API",
@@ -24,36 +120,51 @@ app = FastAPI(
 # Cấu hình CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
+def get_current_user(token: str = Depends(auth.oauth2_scheme)):
+    """Lấy thông tin user từ JWT token."""
+    credentials_exception = HTTPException(
+        status_code=401, detail="Không thể xác thực credentials"
+    )
+    try:
+        payload = auth.decode_token(token)
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+        return payload
+    except Exception:
+        raise credentials_exception
+
+
 @app.get("/")
 def read_root():
     return {"message": "Welcome to Smart Farm API! Database đã được kết nối và tạo bảng thành công."}
 
+
 # ==========================================
 # API CHO BẢNG KHU VỰC (ZONES)
 # ==========================================
-# 1. CREATE - Thêm khu vực mới
 @app.post("/api/zones/", response_model=schemas.ZoneResponse)
 def create_zone(zone: schemas.ZoneCreate, db: Session = Depends(get_db)):
-    # Biến dữ liệu Pydantic thành SQLAlchemy Model
     db_zone = models.Zone(**zone.model_dump())
     db.add(db_zone)
     db.commit()
-    db.refresh(db_zone) # Lấy lại ID vừa được tự động tạo
+    db.refresh(db_zone)
     return db_zone
 
-# 2. READ - Lấy danh sách toàn bộ khu vực
+
 @app.get("/api/zones/", response_model=list[schemas.ZoneResponse])
 def get_all_zones(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     zones = db.query(models.Zone).offset(skip).limit(limit).all()
     return zones
 
-# 3. READ - Lấy chi tiết 1 khu vực theo ID
+
 @app.get("/api/zones/{zone_id}", response_model=schemas.ZoneResponse)
 def get_zone_by_id(zone_id: int, db: Session = Depends(get_db)):
     zone = db.query(models.Zone).filter(models.Zone.id == zone_id).first()
@@ -61,22 +172,19 @@ def get_zone_by_id(zone_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Không tìm thấy khu vực này")
     return zone
 
-# 4. UPDATE - Cập nhật thông tin khu vực
+
 @app.put("/api/zones/{zone_id}", response_model=schemas.ZoneResponse)
 def update_zone(zone_id: int, zone_update: schemas.ZoneCreate, db: Session = Depends(get_db)):
     db_zone = db.query(models.Zone).filter(models.Zone.id == zone_id).first()
     if db_zone is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy khu vực này")
-    
-    # Cập nhật các trường dữ liệu
     for key, value in zone_update.model_dump().items():
         setattr(db_zone, key, value)
-        
     db.commit()
     db.refresh(db_zone)
     return db_zone
 
-# 5. DELETE - Xóa khu vực
+
 @app.delete("/api/zones/{zone_id}")
 def delete_zone(zone_id: int, db: Session = Depends(get_db)):
     db_zone = db.query(models.Zone).filter(models.Zone.id == zone_id).first()
@@ -86,7 +194,7 @@ def delete_zone(zone_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"message": "Đã xóa khu vực thành công"}
 
-# 6. PATCH - Cập nhật một phần khu vực (gán cây trồng, đổi tên, mô tả...)
+
 @app.patch("/api/zones/{zone_id}", response_model=schemas.ZoneResponse)
 def patch_zone(zone_id: int, zone_patch: schemas.ZonePatch, db: Session = Depends(get_db)):
     db_zone = db.query(models.Zone).filter(models.Zone.id == zone_id).first()
@@ -94,7 +202,6 @@ def patch_zone(zone_id: int, zone_patch: schemas.ZonePatch, db: Session = Depend
         raise HTTPException(status_code=404, detail="Không tìm thấy khu vực này")
     update_data = zone_patch.model_dump(exclude_unset=True)
 
-    # ── Ghi log khi gán / đổi cây trồng ──────────────────────────
     if "crop_setting_id" in update_data:
         new_crop_id = update_data["crop_setting_id"]
         if new_crop_id != db_zone.crop_setting_id:
@@ -112,13 +219,13 @@ def patch_zone(zone_id: int, zone_patch: schemas.ZonePatch, db: Session = Depend
             else:
                 msg = f"Khu vực '{db_zone.name}' đã xoá cây trồng (trước đó: '{old_crop_name}')."
             log_event(db,
-                log_type = "system",
-                severity = "info",
-                title    = f"Thay đổi cây trồng — {db_zone.name}",
-                message  = msg,
-                zone_id  = zone_id,
-                actor    = "Admin",
-            )
+                      log_type="system",
+                      severity="info",
+                      title=f"Thay đổi cây trồng — {db_zone.name}",
+                      message=msg,
+                      zone_id=zone_id,
+                      actor="Admin",
+                      )
 
     for key, value in update_data.items():
         setattr(db_zone, key, value)
@@ -126,7 +233,7 @@ def patch_zone(zone_id: int, zone_patch: schemas.ZonePatch, db: Session = Depend
     db.refresh(db_zone)
     return db_zone
 
-# 7. GET - Lấy danh sách thiết bị thuộc 1 khu vực
+
 @app.get("/api/zones/{zone_id}/devices", response_model=list[schemas.DeviceResponse])
 def get_devices_by_zone(zone_id: int, db: Session = Depends(get_db)):
     zone = db.query(models.Zone).filter(models.Zone.id == zone_id).first()
@@ -136,21 +243,21 @@ def get_devices_by_zone(zone_id: int, db: Session = Depends(get_db)):
     for d in zone.devices:
         dtype = db.query(models.DeviceType).filter(models.DeviceType.id == d.type_id).first()
         result.append(schemas.DeviceResponse(
-            id          = d.id,
-            device_name = d.name,
-            device_type = dtype.category if dtype else "SENSOR",
-            pin         = d.pin_connector,
-            func        = dtype.name if dtype else None,
-            zone_id     = d.zone_id,
-            status      = "ONLINE" if d.is_active else "OFFLINE",
-            is_active   = d.is_active,
+            id=d.id,
+            device_name=d.name,
+            device_type=dtype.category if dtype else "SENSOR",
+            pin=d.pin_connector,
+            func=dtype.name if dtype else None,
+            zone_id=d.zone_id,
+            status="ONLINE" if d.is_active else "OFFLINE",
+            is_active=d.is_active,
         ))
     return result
 
-# 8. POST - Gán thiết bị vào khu vực
+
 @app.post("/api/zones/{zone_id}/devices/{device_id}", response_model=schemas.DeviceResponse)
 def assign_device_to_zone(zone_id: int, device_id: int, db: Session = Depends(get_db)):
-    zone   = db.query(models.Zone).filter(models.Zone.id == zone_id).first()
+    zone = db.query(models.Zone).filter(models.Zone.id == zone_id).first()
     device = db.query(models.Device).filter(models.Device.id == device_id).first()
     if not zone:
         raise HTTPException(status_code=404, detail="Không tìm thấy khu vực")
@@ -161,29 +268,28 @@ def assign_device_to_zone(zone_id: int, device_id: int, db: Session = Depends(ge
     db.refresh(device)
     dtype = db.query(models.DeviceType).filter(models.DeviceType.id == device.type_id).first()
 
-    # ── Ghi log gán thiết bị ──────────────────────────────────────
     log_event(db,
-        log_type  = "system",
-        severity  = "info",
-        title     = f"Gán thiết bị vào khu vực — {zone.name}",
-        message   = f"Thiết bị '{device.name}' đã được gán vào {zone.name}.",
-        zone_id   = zone_id,
-        device_id = device.id,
-        actor     = "Admin",
-    )
+              log_type="system",
+              severity="info",
+              title=f"Gán thiết bị vào khu vực — {zone.name}",
+              message=f"Thiết bị '{device.name}' đã được gán vào {zone.name}.",
+              zone_id=zone_id,
+              device_id=device.id,
+              actor="Admin",
+              )
 
     return schemas.DeviceResponse(
-        id          = device.id,
-        device_name = device.name,
-        device_type = dtype.category if dtype else "SENSOR",
-        pin         = device.pin_connector,
-        func        = dtype.name if dtype else None,
-        zone_id     = device.zone_id,
-        status      = "ONLINE" if device.is_active else "OFFLINE",
-        is_active   = device.is_active,
+        id=device.id,
+        device_name=device.name,
+        device_type=dtype.category if dtype else "SENSOR",
+        pin=device.pin_connector,
+        func=dtype.name if dtype else None,
+        zone_id=device.zone_id,
+        status="ONLINE" if device.is_active else "OFFLINE",
+        is_active=device.is_active,
     )
 
-# 9. DELETE - Gỡ thiết bị khỏi khu vực
+
 @app.delete("/api/zones/{zone_id}/devices/{device_id}", response_model=schemas.DeviceResponse)
 def remove_device_from_zone(zone_id: int, device_id: int, db: Session = Depends(get_db)):
     device = db.query(models.Device).filter(
@@ -192,40 +298,38 @@ def remove_device_from_zone(zone_id: int, device_id: int, db: Session = Depends(
     if not device:
         raise HTTPException(status_code=404, detail="Không tìm thấy thiết bị trong khu vực này")
     zone = db.query(models.Zone).filter(models.Zone.id == zone_id).first()
-    dev_name  = device.name
+    dev_name = device.name
     zone_name = zone.name if zone else f"#{zone_id}"
     device.zone_id = None
     db.commit()
     db.refresh(device)
     dtype = db.query(models.DeviceType).filter(models.DeviceType.id == device.type_id).first()
 
-    # ── Ghi log gỡ thiết bị ───────────────────────────────────────
     log_event(db,
-        log_type  = "system",
-        severity  = "info",
-        title     = f"Gỡ thiết bị khỏi khu vực — {zone_name}",
-        message   = f"Thiết bị '{dev_name}' đã bị gỡ khỏi {zone_name}.",
-        zone_id   = zone_id,
-        device_id = device.id,
-        actor     = "Admin",
-    )
+              log_type="system",
+              severity="info",
+              title=f"Gỡ thiết bị khỏi khu vực — {zone_name}",
+              message=f"Thiết bị '{dev_name}' đã bị gỡ khỏi {zone_name}.",
+              zone_id=zone_id,
+              device_id=device.id,
+              actor="Admin",
+              )
 
     return schemas.DeviceResponse(
-        id          = device.id,
-        device_name = device.name,
-        device_type = dtype.category if dtype else "SENSOR",
-        pin         = device.pin_connector,
-        func        = dtype.name if dtype else None,
-        zone_id     = device.zone_id,
-        status      = "ONLINE" if device.is_active else "OFFLINE",
-        is_active   = device.is_active,
+        id=device.id,
+        device_name=device.name,
+        device_type=dtype.category if dtype else "SENSOR",
+        pin=device.pin_connector,
+        func=dtype.name if dtype else None,
+        zone_id=device.zone_id,
+        status="ONLINE" if device.is_active else "OFFLINE",
+        is_active=device.is_active,
     )
+
 
 # ==========================================
 # API QUẢN LÝ CẤU HÌNH CÂY TRỒNG (CROP SETTINGS)
 # ==========================================
-
-# 1. CREATE - Thêm cấu hình cây trồng mới
 @app.post("/api/crop-settings/", response_model=schemas.CropSettingResponse)
 def create_crop_setting(crop: schemas.CropSettingCreate, db: Session = Depends(get_db)):
     db_crop = models.CropSetting(**crop.model_dump())
@@ -234,12 +338,12 @@ def create_crop_setting(crop: schemas.CropSettingCreate, db: Session = Depends(g
     db.refresh(db_crop)
     return db_crop
 
-# 2. READ - Lấy toàn bộ cấu hình cây trồng
+
 @app.get("/api/crop-settings/", response_model=list[schemas.CropSettingResponse])
 def get_all_crop_settings(db: Session = Depends(get_db)):
     return db.query(models.CropSetting).all()
 
-# 3. READ - Lấy chi tiết 1 cấu hình
+
 @app.get("/api/crop-settings/{crop_id}", response_model=schemas.CropSettingResponse)
 def get_crop_setting_by_id(crop_id: int, db: Session = Depends(get_db)):
     crop = db.query(models.CropSetting).filter(models.CropSetting.id == crop_id).first()
@@ -247,7 +351,7 @@ def get_crop_setting_by_id(crop_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Không tìm thấy cấu hình cây trồng")
     return crop
 
-# 4. UPDATE - Cập nhật cấu hình cây trồng
+
 @app.put("/api/crop-settings/{crop_id}", response_model=schemas.CropSettingResponse)
 def update_crop_setting(crop_id: int, crop_data: schemas.CropSettingCreate, db: Session = Depends(get_db)):
     crop = db.query(models.CropSetting).filter(models.CropSetting.id == crop_id).first()
@@ -257,12 +361,11 @@ def update_crop_setting(crop_id: int, crop_data: schemas.CropSettingCreate, db: 
     old_auto_mode = crop.auto_mode
     new_auto_mode = crop_data.auto_mode
 
-    # ── Ghi log các thay đổi ngưỡng ──────────────────────────────
     changes = []
     new_vals = crop_data.model_dump()
     field_labels = {
-        "temp_min":  "Nhiệt độ tối thiểu",
-        "temp_max":  "Nhiệt độ tối đa",
+        "temp_min": "Nhiệt độ tối thiểu",
+        "temp_max": "Nhiệt độ tối đa",
         "humid_min": "Độ ẩm tối thiểu",
         "humid_max": "Độ ẩm tối đa",
     }
@@ -275,14 +378,13 @@ def update_crop_setting(crop_id: int, crop_data: schemas.CropSettingCreate, db: 
 
     if changes:
         log_event(db,
-            log_type = "system",
-            severity = "info",
-            title    = f"Thay đổi cấu hình cây trồng — {crop.crop_name}",
-            message  = f"Admin vừa cập nhật ngưỡng '{crop.crop_name}': " + "; ".join(changes) + ".",
-            actor    = "Admin",
-        )
+                  log_type="system",
+                  severity="info",
+                  title=f"Thay đổi cấu hình cây trồng — {crop.crop_name}",
+                  message=f"Admin vừa cập nhật ngưỡng '{crop.crop_name}': " + "; ".join(changes) + ".",
+                  actor="Admin",
+                  )
 
-    # ── Nếu bật auto_mode, chạy automation ngay lập tức dựa trên telemetry cuối cùng ──
     if not old_auto_mode and new_auto_mode:
         zones = db.query(models.Zone).filter(models.Zone.crop_setting_id == crop_id).all()
         for zone in zones:
@@ -291,8 +393,7 @@ def update_crop_setting(crop_id: int, crop_data: schemas.CropSettingCreate, db: 
                 temp = telemetry.get("temperature")
                 humid = telemetry.get("humidity")
                 light = telemetry.get("light")
-                
-                # Chạy logic automation tương tự như trong telemetry endpoint
+
                 def _find_actuator(type_name: str):
                     for dev in zone.devices:
                         dt = db.query(models.DeviceType).filter(models.DeviceType.id == dev.type_id).first()
@@ -306,59 +407,136 @@ def update_crop_setting(crop_id: int, crop_data: schemas.CropSettingCreate, db: 
                     if device.is_active == target_active:
                         return
                     device.is_active = target_active
-                    if device.pin_connector and str(device.pin_connector).startswith("AIO /"):
-                        feed_key = str(device.pin_connector).replace("AIO /", "").strip()
-                        str_val = "1" if target_active else "0"
-                        _publish_adafruit(feed_key, str_val)
+                    db.commit()
+                    db.refresh(device)
                     log_event(db,
-                        log_type    = "automation",
-                        severity    = "success",
-                        title       = f"{'Bật' if target_active else 'Tắt'} tự động — {device.name}",
-                        message     = (f"🔄 Hệ thống tự động {action_desc} tại {zone.name} "
+                              log_type="automation",
+                              severity="success",
+                              title=f"{'Bật' if target_active else 'Tắt'} tự động — {device.name}",
+                              message=(f"🔄 Hệ thống tự động {action_desc} tại {zone.name} "
                                        f"({device.name})."),
-                        zone_id     = zone.id,
-                        device_id   = device.id,
-                        actor       = "SYSTEM",
-                    )
+                              zone_id=zone.id,
+                              device_id=device.id,
+                              actor="SYSTEM",
+                              )
 
                 if temp is not None:
                     if temp > crop.temp_max:
-                        fan = _find_actuator("quạt")
-                        _auto_set(fan, True, "bật quạt thông gió để hạ nhiệt độ")
+                        if _can_log(db, zone.id, "temperature", "critical"):
+                            log_event(db,
+                                      log_type="critical",
+                                      severity="critical",
+                                      title=f"Nhiệt độ vượt ngưỡng — {zone.name}",
+                                      message=(f"⚠️ Nhiệt độ {zone.name} đã lên {temp}°C "
+                                             f"(Ngưỡng tối đa: {crop.temp_max}°C). Nguy cơ héo lá!"),
+                                      zone_id=zone_id,
+                                      metric_key="temperature",
+                                      metric_value=float(temp),
+                                      threshold=float(crop.temp_max),
+                                      action_label="Bật quạt giải nhiệt ngay",
+                                      action_type="toggle_device",
+                                      )
+                        if crop.auto_mode:
+                            fan = _find_actuator("quạt")
+                            _auto_set(fan, True, "bật quạt thông gió để hạ nhiệt độ")
+                    elif temp > crop.temp_max * 0.93:
+                        if _can_log(db, zone.id, "temperature", "warning"):
+                            log_event(db,
+                                      log_type="warning",
+                                      severity="warning",
+                                      title=f"Nhiệt độ tiệm cận ngưỡng — {zone.name}",
+                                      message=(f"Nhiệt độ {zone.name} đang ở {temp}°C, "
+                                             f"gần ngưỡng tối đa {crop.temp_max}°C. Theo dõi chặt!"),
+                                      zone_id=zone.id,
+                                      metric_key="temperature",
+                                      metric_value=float(temp),
+                                      threshold=float(crop.temp_max),
+                                      )
                     elif temp < crop.temp_min:
-                        fan = _find_actuator("quạt")
-                        _auto_set(fan, False, "tắt quạt thông gió do nhiệt độ đã hạ")
+                        if crop.auto_mode:
+                            fan = _find_actuator("quạt")
+                            _auto_set(fan, False, "tắt quạt thông gió do nhiệt độ đã hạ")
                     else:
-                        fan = _find_actuator("quạt")
-                        _auto_set(fan, False, "tắt quạt thông gió — nhiệt độ đã ổn định")
+                        _alert_cooldown.pop((zone.id, "temperature", "critical"), None)
+                        _alert_cooldown.pop((zone.id, "temperature", "warning"), None)
+                        if crop.auto_mode:
+                            fan = _find_actuator("quạt")
+                            _auto_set(fan, False, "tắt quạt thông gió — nhiệt độ đã ổn định")
 
                 if humid is not None:
                     if humid < crop.humid_min:
-                        pump = _find_actuator("bơm")
-                        _auto_set(pump, True, "bật máy bơm tưới do độ ẩm thấp")
+                        if _can_log(db, zone.id, "humidity", "critical"):
+                            log_event(db,
+                                      log_type="critical",
+                                      severity="critical",
+                                      title=f"Độ ẩm thấp nguy hiểm — {zone.name}",
+                                      message=(f"⚠️ Độ ẩm {zone.name} chỉ còn {humid}% "
+                                             f"(Ngưỡng tối thiểu: {crop.humid_min}%). Cần tưới ngay!"),
+                                      zone_id=zone.id,
+                                      metric_key="humidity",
+                                      metric_value=float(humid),
+                                      threshold=float(crop.humid_min),
+                                      action_label="Bật bơm tưới ngay",
+                                      action_type="toggle_device",
+                                      )
+                        if crop.auto_mode:
+                            pump = _find_actuator("bơm")
+                            _auto_set(pump, True, "bật máy bơm tưới do độ ẩm thấp")
+                    elif humid < crop.humid_min * 1.05:
+                        if _can_log(db, zone.id, "humidity", "warning"):
+                            log_event(db,
+                                      log_type="warning",
+                                      severity="warning",
+                                      title=f"Độ ẩm tiệm cận ngưỡng — {zone.name}",
+                                      message=(f"Độ ẩm {zone.name} đang giảm, hiện ở {humid}% "
+                                             f"(Ngưỡng tối thiểu: {crop.humid_min}%)."),
+                                      zone_id=zone.id,
+                                      metric_key="humidity",
+                                      metric_value=float(humid),
+                                      threshold=float(crop.humid_min),
+                                      )
                     elif humid > crop.humid_max:
-                        pump = _find_actuator("bơm")
-                        _auto_set(pump, False, "tắt máy bơm — độ ẩm đã đạt ngưỡng")
-                        relay = _find_actuator("relay")
-                        _auto_set(relay, True, "bật van thoát nước do độ ẩm quá cao")
+                        if _can_log(db, zone.id, "humidity", "humid_high"):
+                            log_event(db,
+                                      log_type="warning",
+                                      severity="warning",
+                                      title=f"Độ ẩm vượt ngưỡng — {zone.name}",
+                                      message=(f"💧 Độ ẩm {zone.name} đạt {humid}% "
+                                             f"(Ngưỡng tối đa: {crop.humid_max}%). Nguy cơ úng rễ!"),
+                                      zone_id=zone.id,
+                                      metric_key="humidity",
+                                      metric_value=float(humid),
+                                      threshold=float(crop.humid_max),
+                                      )
+                        if crop.auto_mode:
+                            pump = _find_actuator("bơm")
+                            _auto_set(pump, False, "tắt máy bơm — độ ẩm đã đạt ngưỡng")
+                            relay = _find_actuator("relay")
+                            _auto_set(relay, True, "bật van thoát nước do độ ẩm quá cao")
                     else:
-                        pump = _find_actuator("bơm")
-                        _auto_set(pump, False, "tắt máy bơm — độ ẩm đã ổn định")
-                        relay = _find_actuator("relay")
-                        _auto_set(relay, False, "tắt van thoát nước")
+                        _alert_cooldown.pop((zone.id, "humidity", "critical"), None)
+                        _alert_cooldown.pop((zone.id, "humidity", "warning"), None)
+                        if crop.auto_mode:
+                            pump = _find_actuator("bơm")
+                            _auto_set(pump, False, "tắt máy bơm — độ ẩm đã ổn định")
+                            relay = _find_actuator("relay")
+                            _auto_set(relay, False, "tắt van thoát nước")
 
                 if light is not None and crop.light_min is not None and crop.light_max is not None:
                     if light > crop.light_max:
-                        led = _find_actuator("led")
-                        _auto_set(led, False, "tắt đèn LED do ánh sáng vượt ngưỡng")
-                        rly = _find_actuator("relay")
-                        _auto_set(rly, True, "bật lưới che nắng do ánh sáng vượt ngưỡng")
+                        if crop.auto_mode:
+                            led = _find_actuator("led")
+                            _auto_set(led, False, "tắt đèn LED do ánh sáng vượt ngưỡng")
+                            rly = _find_actuator("relay")
+                            _auto_set(rly, True, "bật lưới che nắng do ánh sáng vượt ngưỡng")
                     elif light < crop.light_min:
-                        led = _find_actuator("led")
-                        _auto_set(led, True, "bật đèn LED bổ sung do ánh sáng yếu")
+                        if crop.auto_mode:
+                            led = _find_actuator("led")
+                            _auto_set(led, True, "bật đèn LED bổ sung do ánh sáng yếu")
                     else:
-                        rly = _find_actuator("relay")
-                        _auto_set(rly, False, "tắt lưới che nắng — ánh sáng đã ổn định")
+                        if crop.auto_mode:
+                            rly = _find_actuator("relay")
+                            _auto_set(rly, False, "tắt lưới che nắng — ánh sáng đã ổn định")
         db.commit()
 
     for field, value in new_vals.items():
@@ -367,7 +545,7 @@ def update_crop_setting(crop_id: int, crop_data: schemas.CropSettingCreate, db: 
     db.refresh(crop)
     return crop
 
-# 5. DELETE - Xoá cấu hình cây trồng
+
 @app.delete("/api/crop-settings/{crop_id}", status_code=204)
 def delete_crop_setting(crop_id: int, db: Session = Depends(get_db)):
     crop = db.query(models.CropSetting).filter(models.CropSetting.id == crop_id).first()
@@ -376,11 +554,10 @@ def delete_crop_setting(crop_id: int, db: Session = Depends(get_db)):
     db.delete(crop)
     db.commit()
 
+
 # ==========================================
 # API QUẢN LÝ THIẾT BỊ (DEVICES)
 # ==========================================
-
-# 1. READ - Lấy toàn bộ thiết bị
 @app.get("/api/devices/", response_model=list[schemas.DeviceResponse])
 def get_all_devices(db: Session = Depends(get_db)):
     devices = db.query(models.Device).all()
@@ -388,20 +565,21 @@ def get_all_devices(db: Session = Depends(get_db)):
     for d in devices:
         dtype = db.query(models.DeviceType).filter(models.DeviceType.id == d.type_id).first()
         result.append(schemas.DeviceResponse(
-            id          = d.id,
-            device_name = d.name,
-            device_type = dtype.category if dtype else "SENSOR",
-            pin         = d.pin_connector,
-            func        = dtype.name if dtype else None,
-            zone_id     = d.zone_id,
-            status      = "ONLINE" if d.is_active else "OFFLINE",
-            is_active   = d.is_active,
+            id=d.id,
+            device_name=d.name,
+            device_type=dtype.category if dtype else "SENSOR",
+            pin=d.pin_connector,
+            func=dtype.name if dtype else None,
+            zone_id=d.zone_id,
+            status="ONLINE" if d.is_active else "OFFLINE",
+            is_active=d.is_active,
         ))
     return result
 
-# Helper: Gửi lệnh điều khiển lên Adafruit IO
+
 AIO_USERNAME = os.getenv('ADAFRUIT_IO_USERNAME', 'YOUR_ADAFRUIT_USERNAME')
-AIO_KEY      = os.getenv('ADAFRUIT_IO_KEY', 'YOUR_ADAFRUIT_AIO_KEY')
+AIO_KEY = os.getenv('ADAFRUIT_IO_KEY', 'YOUR_ADAFRUIT_AIO_KEY')
+
 
 def _publish_adafruit(feed_key: str, value: str):
     def run():
@@ -412,9 +590,10 @@ def _publish_adafruit(feed_key: str, value: str):
             requests.post(url, json=payload, headers=headers, timeout=5)
         except Exception:
             pass
+
     threading.Thread(target=run, daemon=True).start()
 
-# 2. PATCH - Bật/tắt thiết bị
+
 @app.patch("/api/devices/{device_id}/toggle", response_model=schemas.DeviceResponse)
 def toggle_device(device_id: int, body: schemas.DeviceToggle, db: Session = Depends(get_db)):
     device = db.query(models.Device).filter(models.Device.id == device_id).first()
@@ -426,60 +605,54 @@ def toggle_device(device_id: int, body: schemas.DeviceToggle, db: Session = Depe
     db.refresh(device)
     dtype = db.query(models.DeviceType).filter(models.DeviceType.id == device.type_id).first()
 
-    # ── Ghi log thao tác thủ công & Publish MQTT ──────────────────
     if prev_state != body.is_active:
         action_word = "bật" if body.is_active else "tắt"
-        zone_name   = None
+        zone_name = None
         if device.zone_id:
             z = db.query(models.Zone).filter(models.Zone.id == device.zone_id).first()
             zone_name = z.name if z else None
-            
-        # NẾU thiết bị có pin map với Adafruit (VD: "AIO /dadn-fan") -> bắn API cho nó
+
         if device.pin_connector and str(device.pin_connector).startswith("AIO /"):
             feed_key = str(device.pin_connector).replace("AIO /", "").strip()
-            # Gửi "1" cho Bật (ON) và "0" cho Tắt (OFF)
             str_val = "1" if body.is_active else "0"
             _publish_adafruit(feed_key, str_val)
 
         log_event(db,
-            log_type    = "system",
-            severity    = "info",
-            title       = f"Thao tác thủ công — {action_word.capitalize()} thiết bị",
-            message     = (f"Người dùng vừa {action_word} thiết bị '{device.name}'"
-                           + (f" tại {zone_name}" if zone_name else "") + " bằng tay."),
-            zone_id     = device.zone_id,
-            device_id   = device.id,
-            action_type = "navigate_device",
-            actor       = "Manual",
-        )
+                  log_type="system",
+                  severity="info",
+                  title=f"Thao tác thủ công — {action_word.capitalize()} thiết bị",
+                  message=(f"Người dùng vừa {action_word} thiết bị '{device.name}'"
+                         + (f" tại {zone_name}" if zone_name else "") + " bằng tay."),
+                  zone_id=device.zone_id,
+                  device_id=device.id,
+                  action_type="navigate_device",
+                  actor="Manual",
+                  )
 
     return schemas.DeviceResponse(
-        id          = device.id,
-        device_name = device.name,
-        device_type = dtype.category if dtype else "SENSOR",
-        pin         = device.pin_connector,
-        func        = dtype.name if dtype else None,
-        zone_id     = device.zone_id,
-        status      = "ONLINE" if device.is_active else "OFFLINE",
-        is_active   = device.is_active,
+        id=device.id,
+        device_name=device.name,
+        device_type=dtype.category if dtype else "SENSOR",
+        pin=device.pin_connector,
+        func=dtype.name if dtype else None,
+        zone_id=device.zone_id,
+        status="ONLINE" if device.is_active else "OFFLINE",
+        is_active=device.is_active,
     )
+
 
 # ==========================================
 # API ĐĂNG KÝ VÀ ĐĂNG NHẬP
 # ==========================================
-
 @app.post("/api/register", response_model=schemas.UserResponse)
 def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    # 1. Kiểm tra xem username đã tồn tại chưa
     db_user = db.query(models.User).filter(models.User.username == user.username).first()
     if db_user:
         raise HTTPException(status_code=400, detail="Tên đăng nhập đã tồn tại!")
-    
-    # 2. Băm mật khẩu và lưu vào DB
     hashed_pw = auth.get_password_hash(user.password)
     new_user = models.User(
-        username=user.username, 
-        hashed_password=hashed_pw, 
+        username=user.username,
+        hashed_password=hashed_pw,
         name=user.name
     )
     db.add(new_user)
@@ -487,41 +660,36 @@ def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     db.refresh(new_user)
     return new_user
 
+
 @app.post("/api/login", response_model=schemas.Token)
 def login_user(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    # 1. Tìm user trong Database
     user = db.query(models.User).filter(models.User.username == form_data.username).first()
-    
-    # 2. Kiểm tra tài khoản và mật khẩu
     if not user or not auth.verify_password(form_data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Sai tên đăng nhập hoặc mật khẩu!")
-    
-    # 3. Đăng nhập thành công -> Tạo JWT Token
     access_token = auth.create_access_token(data={
-        "sub": user.username, 
+        "sub": user.username,
         "role": user.role,
-        "name": user.name   # <--- Bổ sung dòng này để gửi tên thật cho React
+        "name": user.name
     })
-    
     return {"access_token": access_token, "token_type": "bearer"}
+
+
 # ==========================================
 # API QUẢN LÝ TÀI KHOẢN (USERS)
 # ==========================================
-
-# READ - Lấy danh sách toàn bộ tài khoản trong hệ thống
 @app.get("/api/users/", response_model=list[schemas.UserResponse])
 def get_all_users(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    # Lấy toàn bộ user từ Database, có hỗ trợ phân trang (skip, limit)
     users = db.query(models.User).offset(skip).limit(limit).all()
     return users
 
-# READ - Lấy thông tin chi tiết của 1 tài khoản theo ID
+
 @app.get("/api/users/{user_id}", response_model=schemas.UserResponse)
 def get_user_by_id(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if user is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy tài khoản này")
     return user
+
 
 # --- QUẢN LÝ KẾT NỐI WEBSOCKET ---
 class ConnectionManager:
@@ -539,15 +707,40 @@ class ConnectionManager:
         for connection in self.active_connections:
             await connection.send_json(message)
 
+
 manager = ConnectionManager()
 
-# In-memory store: zone_id → last telemetry payload
 _last_telemetry: dict = {}
-
-# Cooldown cho threshold alert: key=(zone_id, metric, kind) → last_logged datetime
-# Tránh spam: cùng 1 cảnh báo chỉ ghi lại tối đa 1 lần / ALERT_COOLDOWN_SEC giây
 _alert_cooldown: dict = {}
-ALERT_COOLDOWN_SEC = 300   # 5 phút
+ALERT_COOLDOWN_SEC = 300
+
+
+# ── Cache helper ──────────────────────────────────────────────────
+def _cache_set(key: str, value: str, ttl: int = 300):
+    if REDIS_AVAILABLE:
+        try:
+            REDIS_CLIENT.setex(key, ttl, value)
+        except Exception:
+            pass
+
+
+def _cache_get(key: str) -> Optional[str]:
+    if REDIS_AVAILABLE:
+        try:
+            return REDIS_CLIENT.get(key)
+        except Exception:
+            pass
+    return None
+
+
+def _can_log(db: Session, zone_id: int, metric: str, kind: str) -> bool:
+    key = f"alert:{zone_id}:{metric}:{kind}"
+    cached = _cache_get(key)
+    if cached:
+        return False
+    _cache_set(key, "1", ttl=ALERT_COOLDOWN_SEC)
+    return True
+
 
 # --- 1. API ĐỂ IOT GATEWAY GỬI DỮ LIỆU LÊN (POST) ---
 @app.post("/api/telemetry")
@@ -556,12 +749,10 @@ async def receive_telemetry(data: dict, db: Session = Depends(get_db)):
     if zone_id is None:
         raise HTTPException(status_code=400, detail="Thiếu trường zone_id")
 
-    # Kiểm tra khu vực tồn tại
     zone = db.query(models.Zone).filter(models.Zone.id == zone_id).first()
     if zone is None:
         raise HTTPException(status_code=404, detail=f"Khu vực #{zone_id} không tồn tại")
 
-    # Kiểm tra khu vực có ít nhất 1 SENSOR active
     sensors_in_zone = [
         d for d in zone.devices
         if d.is_active
@@ -577,13 +768,25 @@ async def receive_telemetry(data: dict, db: Session = Depends(get_db)):
                    "Hãy bật cảm biến và gán vào khu vực trước khi gửi dữ liệu."
         )
 
-    # Đảm bảo measured_at có mặt trong payload
-    from datetime import datetime, timezone
     if "measured_at" not in data:
         data["measured_at"] = datetime.now(timezone.utc).isoformat()
 
-    # Lưu reading cuối cùng vào bộ nhớ
     _last_telemetry[zone_id] = data
+
+    # ── LƯU VÀO BẢNG telemetry_data ─────────────────────────────
+    measured_at_parsed = datetime.fromisoformat(data["measured_at"])
+    if measured_at_parsed.tzinfo is None:
+        measured_at_parsed = measured_at_parsed.replace(tzinfo=timezone.utc)
+
+    telemetry_row = models.TelemetryData(
+        zone_id=zone_id,
+        temperature=data.get("temperature"),
+        humidity=data.get("humidity"),
+        light=data.get("light"),
+        measured_at=measured_at_parsed,
+    )
+    db.add(telemetry_row)
+    db.commit()
 
     # ── Tự động ghi log khi vượt ngưỡng crop setting ──────────────
     if zone.crop_setting_id:
@@ -591,146 +794,125 @@ async def receive_telemetry(data: dict, db: Session = Depends(get_db)):
             models.CropSetting.id == zone.crop_setting_id
         ).first()
         if crop:
-            temp  = data.get("temperature")
+            temp = data.get("temperature")
             humid = data.get("humidity")
             light = data.get("light")
-            now   = datetime.now(timezone.utc)
+            now = datetime.now(timezone.utc)
 
-            def _can_log(metric: str, kind: str) -> bool:
-                """True nếu chưa log cảnh báo này trong ALERT_COOLDOWN_SEC giây."""
-                key  = (zone_id, metric, kind)
-                last = _alert_cooldown.get(key)
-                if last and (now - last).total_seconds() < ALERT_COOLDOWN_SEC:
-                    return False
-                _alert_cooldown[key] = now
-                return True
-
-            # ── Helper: tìm actuator trong zone theo type name ──────────────
             def _find_actuator(type_name: str):
-                """Tìm thiết bị trong zone có DeviceType.name chứa type_name."""
                 for dev in zone.devices:
                     dt = db.query(models.DeviceType).filter(models.DeviceType.id == dev.type_id).first()
                     if dt and dt.category == "ACTUATOR" and type_name.lower() in dt.name.lower():
                         return dev
                 return None
 
-            # ── Helper: tự động bật/tắt actuator ───────────────────────────
             def _auto_set(device, target_active: bool, action_desc: str):
-                """Nếu auto_mode bật, tự động bật/tắt thiết bị và ghi log automation."""
                 if device is None:
                     return
                 if device.is_active == target_active:
-                    return  # Đã đúng trạng thái rồi
+                    return
                 device.is_active = target_active
                 db.commit()
                 db.refresh(device)
                 log_event(db,
-                    log_type    = "automation",
-                    severity    = "success",
-                    title       = f"{'Bật' if target_active else 'Tắt'} tự động — {device.name}",
-                    message     = (f"🔄 Hệ thống tự động {action_desc} tại {zone.name} "
+                          log_type="automation",
+                          severity="success",
+                          title=f"{'Bật' if target_active else 'Tắt'} tự động — {device.name}",
+                          message=(f"🔄 Hệ thống tự động {action_desc} tại {zone.name} "
                                    f"({device.name})."),
-                    zone_id     = zone_id,
-                    device_id   = device.id,
-                    actor       = "SYSTEM",
-                )
+                          zone_id=zone_id,
+                          device_id=device.id,
+                          actor="SYSTEM",
+                          )
 
             if temp is not None:
                 if temp > crop.temp_max:
-                    if _can_log("temperature", "critical"):
+                    if _can_log(db, zone_id, "temperature", "critical"):
                         log_event(db,
-                            log_type    = "critical",
-                            severity    = "critical",
-                            title       = f"Nhiệt độ vượt ngưỡng — {zone.name}",
-                            message     = (f"⚠️ Nhiệt độ {zone.name} đã lên {temp}°C "
-                                           f"(Ngưỡng tối đa: {crop.temp_max}°C). Nguy cơ héo lá!"),
-                            zone_id     = zone_id,
-                            metric_key  = "temperature",
-                            metric_value= float(temp),
-                            threshold   = float(crop.temp_max),
-                            action_label= "Bật quạt giải nhiệt ngay",
-                            action_type = "toggle_device",
-                        )
-                    # Auto: bật quạt nếu auto_mode
+                                  log_type="critical",
+                                  severity="critical",
+                                  title=f"Nhiệt độ vượt ngưỡng — {zone.name}",
+                                  message=(f"⚠️ Nhiệt độ {zone.name} đã lên {temp}°C "
+                                         f"(Ngưỡng tối đa: {crop.temp_max}°C). Nguy cơ héo lá!"),
+                                  zone_id=zone_id,
+                                  metric_key="temperature",
+                                  metric_value=float(temp),
+                                  threshold=float(crop.temp_max),
+                                  action_label="Bật quạt giải nhiệt ngay",
+                                  action_type="toggle_device",
+                                  )
                     if crop.auto_mode:
                         fan = _find_actuator("quạt")
                         _auto_set(fan, True, "bật quạt thông gió để hạ nhiệt độ")
                 elif temp > crop.temp_max * 0.93:
-                    if _can_log("temperature", "warning"):
+                    if _can_log(db, zone_id, "temperature", "warning"):
                         log_event(db,
-                            log_type    = "warning",
-                            severity    = "warning",
-                            title       = f"Nhiệt độ tiệm cận ngưỡng — {zone.name}",
-                            message     = (f"Nhiệt độ {zone.name} đang ở {temp}°C, "
-                                           f"gần ngưỡng tối đa {crop.temp_max}°C. Theo dõi chặt!"),
-                            zone_id     = zone_id,
-                            metric_key  = "temperature",
-                            metric_value= float(temp),
-                            threshold   = float(crop.temp_max),
-                        )
+                                  log_type="warning",
+                                  severity="warning",
+                                  title=f"Nhiệt độ tiệm cận ngưỡng — {zone.name}",
+                                  message=(f"Nhiệt độ {zone.name} đang ở {temp}°C, "
+                                         f"gần ngưỡng tối đa {crop.temp_max}°C. Theo dõi chặt!"),
+                                  zone_id=zone_id,
+                                  metric_key="temperature",
+                                  metric_value=float(temp),
+                                  threshold=float(crop.temp_max),
+                                  )
                 elif temp < crop.temp_min:
-                    # Auto: tắt quạt nếu nhiệt độ thấp hơn ngưỡng min
                     if crop.auto_mode:
                         fan = _find_actuator("quạt")
                         _auto_set(fan, False, "tắt quạt thông gió do nhiệt độ đã hạ")
                 else:
-                    # Đã trở về bình thường — xoá cooldown
                     _alert_cooldown.pop((zone_id, "temperature", "critical"), None)
-                    _alert_cooldown.pop((zone_id, "temperature", "warning"),  None)
-                    # Auto: tắt quạt nếu nhiệt độ trong ngưỡng và quạt đang bật
+                    _alert_cooldown.pop((zone_id, "temperature", "warning"), None)
                     if crop.auto_mode:
                         fan = _find_actuator("quạt")
                         _auto_set(fan, False, "tắt quạt thông gió — nhiệt độ đã ổn định")
 
             if humid is not None:
                 if humid < crop.humid_min:
-                    if _can_log("humidity", "critical"):
+                    if _can_log(db, zone_id, "humidity", "critical"):
                         log_event(db,
-                            log_type    = "critical",
-                            severity    = "critical",
-                            title       = f"Độ ẩm thấp nguy hiểm — {zone.name}",
-                            message     = (f"⚠️ Độ ẩm {zone.name} chỉ còn {humid}% "
-                                           f"(Ngưỡng tối thiểu: {crop.humid_min}%). Cần tưới ngay!"),
-                            zone_id     = zone_id,
-                            metric_key  = "humidity",
-                            metric_value= float(humid),
-                            threshold   = float(crop.humid_min),
-                            action_label= "Bật bơm tưới ngay",
-                            action_type = "toggle_device",
-                        )
-                    # Auto: bật bơm nếu auto_mode
+                                  log_type="critical",
+                                  severity="critical",
+                                  title=f"Độ ẩm thấp nguy hiểm — {zone.name}",
+                                  message=(f"⚠️ Độ ẩm {zone.name} chỉ còn {humid}% "
+                                         f"(Ngưỡng tối thiểu: {crop.humid_min}%). Cần tưới ngay!"),
+                                  zone_id=zone_id,
+                                  metric_key="humidity",
+                                  metric_value=float(humid),
+                                  threshold=float(crop.humid_min),
+                                  action_label="Bật bơm tưới ngay",
+                                  action_type="toggle_device",
+                                  )
                     if crop.auto_mode:
                         pump = _find_actuator("bơm")
                         _auto_set(pump, True, "bật máy bơm tưới do độ ẩm thấp")
                 elif humid < crop.humid_min * 1.05:
-                    if _can_log("humidity", "warning"):
+                    if _can_log(db, zone_id, "humidity", "warning"):
                         log_event(db,
-                            log_type    = "warning",
-                            severity    = "warning",
-                            title       = f"Độ ẩm tiệm cận ngưỡng — {zone.name}",
-                            message     = (f"Độ ẩm {zone.name} đang giảm, hiện ở {humid}% "
-                                           f"(Ngưỡng tối thiểu: {crop.humid_min}%)."),
-                            zone_id     = zone_id,
-                            metric_key  = "humidity",
-                            metric_value= float(humid),
-                            threshold   = float(crop.humid_min),
-                            action_label= "Bật bơm tưới",
-                            action_type = "toggle_device",
-                        )
+                                  log_type="warning",
+                                  severity="warning",
+                                  title=f"Độ ẩm tiệm cận ngưỡng — {zone.name}",
+                                  message=(f"Độ ẩm {zone.name} đang giảm, hiện ở {humid}% "
+                                         f"(Ngưỡng tối thiểu: {crop.humid_min}%)."),
+                                  zone_id=zone_id,
+                                  metric_key="humidity",
+                                  metric_value=float(humid),
+                                  threshold=float(crop.humid_min),
+                                  )
                 elif humid > crop.humid_max:
-                    if _can_log("humidity", "humid_high"):
+                    if _can_log(db, zone_id, "humidity", "humid_high"):
                         log_event(db,
-                            log_type    = "warning",
-                            severity    = "warning",
-                            title       = f"Độ ẩm vượt ngưỡng — {zone.name}",
-                            message     = (f"💧 Độ ẩm {zone.name} đạt {humid}% "
-                                           f"(Ngưỡng tối đa: {crop.humid_max}%). Nguy cơ úng rễ!"),
-                            zone_id     = zone_id,
-                            metric_key  = "humidity",
-                            metric_value= float(humid),
-                            threshold   = float(crop.humid_max),
-                        )
-                    # Auto: tắt bơm nếu độ ẩm vượt ngưỡng max
+                                  log_type="warning",
+                                  severity="warning",
+                                  title=f"Độ ẩm vượt ngưỡng — {zone.name}",
+                                  message=(f"💧 Độ ẩm {zone.name} đạt {humid}% "
+                                         f"(Ngưỡng tối đa: {crop.humid_max}%). Nguy cơ úng rễ!"),
+                                  zone_id=zone_id,
+                                  metric_key="humidity",
+                                  metric_value=float(humid),
+                                  threshold=float(crop.humid_max),
+                                  )
                     if crop.auto_mode:
                         pump = _find_actuator("bơm")
                         _auto_set(pump, False, "tắt máy bơm — độ ẩm đã đạt ngưỡng")
@@ -738,74 +920,230 @@ async def receive_telemetry(data: dict, db: Session = Depends(get_db)):
                         _auto_set(relay, True, "bật van thoát nước do độ ẩm quá cao")
                 else:
                     _alert_cooldown.pop((zone_id, "humidity", "critical"), None)
-                    _alert_cooldown.pop((zone_id, "humidity", "warning"),  None)
-                    # Auto: tắt bơm nếu độ ẩm đã ổn
+                    _alert_cooldown.pop((zone_id, "humidity", "warning"), None)
                     if crop.auto_mode:
                         pump = _find_actuator("bơm")
                         _auto_set(pump, False, "tắt máy bơm — độ ẩm đã ổn định")
                         relay = _find_actuator("relay")
                         _auto_set(relay, False, "tắt van thoát nước")
 
-            # ── Auto điều khiển theo ngưỡng ánh sáng ────────────────────
             if light is not None and crop.light_min is not None and crop.light_max is not None:
                 if light > crop.light_max:
-                    # Auto: tắt đèn LED / bật relay (lưới che) nếu quá sáng
                     if crop.auto_mode:
                         led = _find_actuator("led")
                         _auto_set(led, False, "tắt đèn LED do ánh sáng vượt ngưỡng")
                         rly = _find_actuator("relay")
                         _auto_set(rly, True, "bật lưới che nắng do ánh sáng vượt ngưỡng")
                 elif light < crop.light_min:
-                    # Auto: bật đèn LED nếu thiếu sáng
                     if crop.auto_mode:
                         led = _find_actuator("led")
                         _auto_set(led, True, "bật đèn LED bổ sung do ánh sáng yếu")
                 else:
-                    # Ánh sáng trong ngưỡng → tắt relay/lưới che
                     if crop.auto_mode:
                         rly = _find_actuator("relay")
                         _auto_set(rly, False, "tắt lưới che nắng — ánh sáng đã ổn định")
+        db.commit()
 
-    # Broadcast cho tất cả frontend đang mở
+    # Invalidate Redis summary cache
+    if REDIS_AVAILABLE:
+        try:
+            REDIS_CLIENT.delete("telemetry:summary")
+        except Exception:
+            pass
+
     await manager.broadcast(data)
-    return {"status": "success", "message": f"Đã nhận và phát sóng cho zone {zone_id}"}
+    return {"status": "success", "message": f"Đã nhận, lưu DB và phát sóng cho zone {zone_id}"}
 
 
-# --- 2. API LẤY TÓM TẮT TELEMETRY (trung bình toàn bộ zone) ---
+# --- 2. API LẤY TÓM TẮT TELEMETRY (có Redis cache) ---
 @app.get("/api/telemetry/summary")
-def get_telemetry_summary():
-    """
-    Trả về:
-      - per_zone: list mỗi zone với reading cuối cùng
-      - averages: trung bình temperature, humidity, light across all active zones
-    """
+def get_telemetry_summary(db: Session = Depends(get_db)):
+    # Kiểm tra Redis cache trước
+    cached = _cache_get("telemetry:summary")
+    if cached:
+        import json
+        return json.loads(cached)
+
     if not _last_telemetry:
-        return {"per_zone": [], "averages": {}, "active_zones": 0}
+        result = {"per_zone": [], "averages": {}, "active_zones": 0}
+        _cache_set("telemetry:summary", json.dumps(result), ttl=60)
+        return result
 
     per_zone = list(_last_telemetry.values())
-    temps  = [z["temperature"] for z in per_zone if "temperature" in z]
-    humids = [z["humidity"]    for z in per_zone if "humidity"    in z]
-    lights = [z["light"]       for z in per_zone if "light"       in z]
+    temps = [z["temperature"] for z in per_zone if "temperature" in z]
+    humids = [z["humidity"] for z in per_zone if "humidity" in z]
+    lights = [z["light"] for z in per_zone if "light" in z]
 
     averages = {}
-    if temps:  averages["temperature"] = round(sum(temps)  / len(temps),  1)
-    if humids: averages["humidity"]    = round(sum(humids) / len(humids), 1)
-    if lights: averages["light"]       = round(sum(lights) / len(lights), 0)
+    if temps:
+        averages["temperature"] = round(sum(temps) / len(temps), 1)
+    if humids:
+        averages["humidity"] = round(sum(humids) / len(humids), 1)
+    if lights:
+        averages["light"] = round(sum(lights) / len(lights), 0)
 
-    return {
-        "per_zone":    per_zone,
-        "averages":    averages,
+    result = {
+        "per_zone": per_zone,
+        "averages": averages,
         "active_zones": len(per_zone),
     }
+    _cache_set("telemetry:summary", json.dumps(result), ttl=60)
+    return result
 
 
-# --- 3. WEBSOCKET ĐỂ FRONTEND LẮNG NGHE DỮ LIỆU (WS) ---
+# ──────────────────────────────────────────────────────────────
+# Phase 1 — TELEMETRY HISTORY & ANALYTICS
+# ──────────────────────────────────────────────────────────────
+@app.get("/api/telemetry/history", response_model=list[schemas.TelemetryHistoryResponse])
+def get_telemetry_history(
+    zone_id: Optional[int] = Query(None, description="Lọc theo zone_id"),
+    metric: Optional[Literal["temperature", "humidity", "light"]] = Query(None),
+    date_from: datetime = Query(..., description="ISO datetime bắt đầu"),
+    date_to: datetime = Query(..., description="ISO datetime kết thúc"),
+    interval: Literal["1m", "5m", "15m", "1h", "1d"] = Query("1m"),
+    limit: int = Query(1000, ge=1, le=10000),
+    db: Session = Depends(get_db),
+):
+    _from = date_from
+    _to = date_to
+    if _from.tzinfo is None:
+        _from = _from.replace(tzinfo=timezone.utc)
+    if _to.tzinfo is None:
+        _to = _to.replace(tzinfo=timezone.utc)
+
+    q = db.query(models.TelemetryData).filter(
+        models.TelemetryData.measured_at >= _from,
+        models.TelemetryData.measured_at <= _to,
+    )
+    if zone_id is not None:
+        q = q.filter(models.TelemetryData.zone_id == zone_id)
+    if metric is not None:
+        col = getattr(models.TelemetryData, metric)
+        q = q.filter(col.isnot(None))
+
+    q = q.order_by(models.TelemetryData.measured_at.asc()).limit(limit)
+    rows = q.all()
+
+    if interval != "1m":
+        interval_map = {
+            "5m": timedelta(minutes=5),
+            "15m": timedelta(minutes=15),
+            "1h": timedelta(hours=1),
+            "1d": timedelta(days=1),
+        }
+        delta = interval_map[interval]
+        grouped: dict[str, list] = {}
+        for row in rows:
+            ts = row.measured_at.replace(tzinfo=None)
+            bucket_start = ts - timedelta(
+                minutes=ts.minute % (delta.total_seconds() / 60),
+                seconds=ts.second,
+                microseconds=ts.microsecond,
+            )
+            if delta >= timedelta(days=1):
+                bucket_start = ts.replace(hour=0, minute=0, second=0, microsecond=0)
+            key = bucket_start.isoformat()
+            if key not in grouped:
+                grouped[key] = []
+            grouped[key].append(row)
+
+        averaged = []
+        for bucket_ts, items in grouped.items():
+            temps = [i.temperature for i in items if i.temperature is not None]
+            humids = [i.humidity for i in items if i.humidity is not None]
+            lights = [i.light for i in items if i.light is not None]
+            averaged.append(models.TelemetryData(
+                id=items[0].id,
+                zone_id=items[0].zone_id,
+                temperature=round(sum(temps) / len(temps), 2) if temps else None,
+                humidity=round(sum(humids) / len(humids), 2) if humids else None,
+                light=round(sum(lights) / len(lights), 2) if lights else None,
+                measured_at=datetime.fromisoformat(bucket_ts).replace(tzinfo=timezone.utc),
+            ))
+        rows = averaged
+
+    zone_names: dict[int, str] = {}
+    for row in rows:
+        if row.zone_id not in zone_names:
+            z = db.query(models.Zone).filter(models.Zone.id == row.zone_id).first()
+            zone_names[row.zone_id] = z.name if z else None
+
+    return [
+        schemas.TelemetryHistoryResponse(
+            id=row.id,
+            zone_id=row.zone_id,
+            zone_name=zone_names.get(row.zone_id),
+            temperature=row.temperature,
+            humidity=row.humidity,
+            light=row.light,
+            measured_at=row.measured_at,
+        )
+        for row in rows
+    ]
+
+
+@app.get("/api/telemetry/analytics", response_model=list[schemas.TelemetryAnalyticsRow])
+def get_telemetry_analytics(
+    zone_id: Optional[int] = Query(None, description="Lọc theo zone_id"),
+    date_from: datetime = Query(..., description="ISO datetime bắt đầu"),
+    date_to: datetime = Query(..., description="ISO datetime kết thúc"),
+    db: Session = Depends(get_db),
+):
+    _from = date_from
+    _to = date_to
+    if _from.tzinfo is None:
+        _from = _from.replace(tzinfo=timezone.utc)
+    if _to.tzinfo is None:
+        _to = _to.replace(tzinfo=timezone.utc)
+
+    q = db.query(models.TelemetryData).filter(
+        models.TelemetryData.measured_at >= _from,
+        models.TelemetryData.measured_at <= _to,
+    )
+    if zone_id is not None:
+        q = q.filter(models.TelemetryData.zone_id == zone_id)
+
+    rows = q.all()
+
+    from collections import defaultdict
+    buckets: dict[int, dict[str, list]] = defaultdict(lambda: {"temperature": [], "humidity": [], "light": []})
+    for row in rows:
+        if row.temperature is not None:
+            buckets[row.zone_id]["temperature"].append(row.temperature)
+        if row.humidity is not None:
+            buckets[row.zone_id]["humidity"].append(row.humidity)
+        if row.light is not None:
+            buckets[row.zone_id]["light"].append(row.light)
+
+    zone_names: dict[int, str] = {}
+    for zid in buckets:
+        z = db.query(models.Zone).filter(models.Zone.id == zid).first()
+        zone_names[zid] = z.name if z else None
+
+    result = []
+    for zid, metrics in buckets.items():
+        for metric_name, values in metrics.items():
+            if not values:
+                continue
+            result.append(schemas.TelemetryAnalyticsRow(
+                zone_id=zid,
+                zone_name=zone_names.get(zid),
+                metric=metric_name,
+                min=round(min(values), 2),
+                max=round(max(values), 2),
+                avg=round(sum(values) / len(values), 2),
+                count=len(values),
+            ))
+
+    return result
+
+
+# --- 3. WEBSOCKET ---
 @app.websocket("/ws/telemetry")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-            # Giữ kết nối luôn mở
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
@@ -816,8 +1154,7 @@ async def websocket_endpoint(websocket: WebSocket):
 # ==========================================
 
 def _build_log_response(log: models.AlertLog, db: Session) -> dict:
-    """Chuyển đổi ORM object → dict response, resolve zone_name & device_name."""
-    zone_name   = None
+    zone_name = None
     device_name = None
     if log.zone_id:
         z = db.query(models.Zone).filter(models.Zone.id == log.zone_id).first()
@@ -826,24 +1163,24 @@ def _build_log_response(log: models.AlertLog, db: Session) -> dict:
         d = db.query(models.Device).filter(models.Device.id == log.device_id).first()
         device_name = d.name if d else None
     return {
-        "id":               log.id,
-        "log_type":         log.log_type,
-        "severity":         log.severity,
-        "title":            log.title,
-        "message":          log.message,
-        "zone_id":          log.zone_id,
-        "device_id":        log.device_id,
-        "action_label":     log.action_label,
-        "action_type":      log.action_type,
+        "id": log.id,
+        "log_type": log.log_type,
+        "severity": log.severity,
+        "title": log.title,
+        "message": log.message,
+        "zone_id": log.zone_id,
+        "device_id": log.device_id,
+        "action_label": log.action_label,
+        "action_type": log.action_type,
         "action_target_id": log.action_target_id,
-        "actor":            log.actor,
-        "is_read":          log.is_read,
-        "metric_key":       log.metric_key,
-        "metric_value":     log.metric_value,
-        "threshold":        log.threshold,
-        "created_at":       log.created_at.isoformat() + "Z" if log.created_at else None,
-        "zone_name":        zone_name,
-        "device_name":      device_name,
+        "actor": log.actor,
+        "is_read": log.is_read,
+        "metric_key": log.metric_key,
+        "metric_value": log.metric_value,
+        "threshold": log.threshold,
+        "created_at": log.created_at.isoformat() + "Z" if log.created_at else None,
+        "zone_name": zone_name,
+        "device_name": device_name,
     }
 
 
@@ -854,42 +1191,37 @@ def log_event(
     severity: str,
     title: str,
     message: str,
-    zone_id:          int   = None,
-    device_id:        int   = None,
-    action_label:     str   = None,
-    action_type:      str   = None,
-    action_target_id: int   = None,
-    actor:            str   = "SYSTEM",
-    metric_key:       str   = None,
-    metric_value:     float = None,
-    threshold:        float = None,
+    zone_id: int = None,
+    device_id: int = None,
+    action_label: str = None,
+    action_type: str = None,
+    action_target_id: int = None,
+    actor: str = "SYSTEM",
+    metric_key: str = None,
+    metric_value: float = None,
+    threshold: float = None,
 ) -> models.AlertLog:
-    """
-    Helper nội bộ: tạo một AlertLog entry, commit, rồi broadcast WS event
-    với type='new_log' để Dashboard cập nhật tức thì.
-    """
     entry = models.AlertLog(
-        log_type         = log_type,
-        severity         = severity,
-        title            = title,
-        message          = message,
-        zone_id          = zone_id,
-        device_id        = device_id,
-        action_label     = action_label,
-        action_type      = action_type,
-        action_target_id = action_target_id,
-        actor            = actor,
-        metric_key       = metric_key,
-        metric_value     = metric_value,
-        threshold        = threshold,
-        created_at       = datetime.now(timezone.utc).replace(tzinfo=None),
+        log_type=log_type,
+        severity=severity,
+        title=title,
+        message=message,
+        zone_id=zone_id,
+        device_id=device_id,
+        action_label=action_label,
+        action_type=action_type,
+        action_target_id=action_target_id,
+        actor=actor,
+        metric_key=metric_key,
+        metric_value=metric_value,
+        threshold=threshold,
+        created_at=datetime.now(timezone.utc).replace(tzinfo=None),
     )
     db.add(entry)
     db.commit()
     db.refresh(entry)
 
-    # Resolve names for the WS push
-    zone_name   = None
+    zone_name = None
     device_name = None
     if zone_id:
         z = db.query(models.Zone).filter(models.Zone.id == zone_id).first()
@@ -900,86 +1232,86 @@ def log_event(
 
     import asyncio
     ws_payload = {
-        "_type":          "new_log",
-        "id":             entry.id,
-        "log_type":       log_type,
-        "severity":       severity,
-        "title":          title,
-        "message":        message,
-        "zone_id":        zone_id,
-        "zone_name":      zone_name,
-        "device_id":      device_id,
-        "device_name":    device_name,
-        "action_label":   action_label,
-        "action_type":    action_type,
-        "actor":          actor,
-        "metric_key":     metric_key,
-        "metric_value":   metric_value,
-        "threshold":      threshold,
-        "is_read":        False,
-        "created_at":     entry.created_at.isoformat() + "Z",
+        "_type": "new_log",
+        "id": entry.id,
+        "log_type": log_type,
+        "severity": severity,
+        "title": title,
+        "message": message,
+        "zone_id": zone_id,
+        "zone_name": zone_name,
+        "device_id": device_id,
+        "device_name": device_name,
+        "action_label": action_label,
+        "action_type": action_type,
+        "actor": actor,
+        "metric_key": metric_key,
+        "metric_value": metric_value,
+        "threshold": threshold,
+        "is_read": False,
+        "created_at": entry.created_at.isoformat() + "Z",
     }
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
             asyncio.ensure_future(manager.broadcast(ws_payload))
     except Exception:
-        pass   # broadcast là best-effort, không làm hỏng response
+        pass
 
     return entry
 
 
-# ── 1. GET  /api/logs/  — lấy danh sách log (có filter) ──────────────────────
+# ── Log endpoints ──────────────────────────────────────────────
 @app.get("/api/logs/", response_model=list[schemas.AlertLogResponse])
 def get_logs(
-    log_type:  Optional[str] = Query(None, description="critical|warning|automation|system"),
-    severity:  Optional[str] = Query(None),
-    zone_id:   Optional[int] = Query(None),
-    is_read:   Optional[bool] = Query(None),
-    limit:     int = Query(50, ge=1, le=200),
-    offset:    int = Query(0,  ge=0),
+    log_type: Optional[str] = Query(None, description="critical|warning|automation|system"),
+    severity: Optional[str] = Query(None),
+    zone_id: Optional[int] = Query(None),
+    is_read: Optional[bool] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
     q = db.query(models.AlertLog)
-    if log_type: q = q.filter(models.AlertLog.log_type == log_type)
-    if severity: q = q.filter(models.AlertLog.severity == severity)
-    if zone_id:  q = q.filter(models.AlertLog.zone_id == zone_id)
+    if log_type:
+        q = q.filter(models.AlertLog.log_type == log_type)
+    if severity:
+        q = q.filter(models.AlertLog.severity == severity)
+    if zone_id:
+        q = q.filter(models.AlertLog.zone_id == zone_id)
     if is_read is not None:
         q = q.filter(models.AlertLog.is_read == is_read)
     logs = q.order_by(models.AlertLog.created_at.desc()).offset(offset).limit(limit).all()
     return [_build_log_response(l, db) for l in logs]
 
 
-# ── 2. GET  /api/logs/unread-count  — badge số chưa đọc ─────────────────────
 @app.get("/api/logs/unread-count")
 def get_unread_count(db: Session = Depends(get_db)):
     count = db.query(models.AlertLog).filter(models.AlertLog.is_read == False).count()
     return {"unread": count}
 
 
-# ── 3. POST /api/logs/  — tạo log thủ công ───────────────────────────────────
 @app.post("/api/logs/", response_model=schemas.AlertLogResponse, status_code=201)
 def create_log(payload: schemas.AlertLogCreate, db: Session = Depends(get_db)):
     entry = log_event(
         db,
-        log_type         = payload.log_type,
-        severity         = payload.severity,
-        title            = payload.title,
-        message          = payload.message,
-        zone_id          = payload.zone_id,
-        device_id        = payload.device_id,
-        action_label     = payload.action_label,
-        action_type      = payload.action_type,
-        action_target_id = payload.action_target_id,
-        actor            = payload.actor or "MANUAL",
-        metric_key       = payload.metric_key,
-        metric_value     = payload.metric_value,
-        threshold        = payload.threshold,
+        log_type=payload.log_type,
+        severity=payload.severity,
+        title=payload.title,
+        message=payload.message,
+        zone_id=payload.zone_id,
+        device_id=payload.device_id,
+        action_label=payload.action_label,
+        action_type=payload.action_type,
+        action_target_id=payload.action_target_id,
+        actor=payload.actor or "MANUAL",
+        metric_key=payload.metric_key,
+        metric_value=payload.metric_value,
+        threshold=payload.threshold,
     )
     return _build_log_response(entry, db)
 
 
-# ── 4. PATCH /api/logs/{id}/read  — đánh dấu đã đọc ─────────────────────────
 @app.patch("/api/logs/{log_id}/read", response_model=schemas.AlertLogResponse)
 def mark_log_read(log_id: int, db: Session = Depends(get_db)):
     entry = db.query(models.AlertLog).filter(models.AlertLog.id == log_id).first()
@@ -991,7 +1323,6 @@ def mark_log_read(log_id: int, db: Session = Depends(get_db)):
     return _build_log_response(entry, db)
 
 
-# ── 5. POST /api/logs/read-all  — đánh dấu tất cả đã đọc ────────────────────
 @app.post("/api/logs/read-all")
 def mark_all_read(db: Session = Depends(get_db)):
     updated = db.query(models.AlertLog).filter(models.AlertLog.is_read == False).all()
@@ -1001,7 +1332,6 @@ def mark_all_read(db: Session = Depends(get_db)):
     return {"marked_read": len(updated)}
 
 
-# ── 6. DELETE /api/logs/{id}  — xoá 1 log ────────────────────────────────────
 @app.delete("/api/logs/{log_id}", status_code=204)
 def delete_log(log_id: int, db: Session = Depends(get_db)):
     entry = db.query(models.AlertLog).filter(models.AlertLog.id == log_id).first()
@@ -1009,3 +1339,650 @@ def delete_log(log_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Log không tồn tại")
     db.delete(entry)
     db.commit()
+
+
+# ================================================================
+# Phase 2 — DASHBOARD WIDGETS
+# ================================================================
+
+@app.get("/api/dashboard/widgets", response_model=list[schemas.DashboardWidgetResponse])
+def get_dashboard_widgets(
+    user_id: Optional[int] = Query(None, description="Lọc theo user_id (null = tất cả)"),
+    db: Session = Depends(get_db),
+):
+    q = db.query(models.DashboardWidget).filter(models.DashboardWidget.is_active == True)
+    if user_id is not None:
+        q = q.filter(
+            (models.DashboardWidget.user_id == user_id) |
+            (models.DashboardWidget.user_id == None)
+        )
+    else:
+        q = q.filter(models.DashboardWidget.user_id == None)
+    widgets = q.order_by(models.DashboardWidget.position.asc()).all()
+    return widgets
+
+
+@app.post("/api/dashboard/widgets", response_model=schemas.DashboardWidgetResponse, status_code=201)
+def create_dashboard_widget(
+    payload: schemas.DashboardWidgetCreate,
+    db: Session = Depends(get_db),
+):
+    max_pos = db.query(func.max(models.DashboardWidget.position)).filter(
+        models.DashboardWidget.user_id == payload.user_id
+    ).scalar()
+    new_position = (max_pos or 0) + 1
+
+    widget = models.DashboardWidget(
+        user_id=payload.user_id,
+        widget_type=payload.widget_type,
+        title=payload.title,
+        config=payload.config,
+        position=payload.position if payload.position else new_position,
+        is_active=payload.is_active if payload.is_active is not None else True,
+    )
+    db.add(widget)
+    db.commit()
+    db.refresh(widget)
+    return widget
+
+
+@app.get("/api/dashboard/widgets/{widget_id}", response_model=schemas.DashboardWidgetResponse)
+def get_dashboard_widget(widget_id: int, db: Session = Depends(get_db)):
+    widget = db.query(models.DashboardWidget).filter(models.DashboardWidget.id == widget_id).first()
+    if widget is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy widget")
+    return widget
+
+
+@app.put("/api/dashboard/widgets/{widget_id}", response_model=schemas.DashboardWidgetResponse)
+def update_dashboard_widget(
+    widget_id: int,
+    payload: schemas.DashboardWidgetUpdate,
+    db: Session = Depends(get_db),
+):
+    widget = db.query(models.DashboardWidget).filter(models.DashboardWidget.id == widget_id).first()
+    if widget is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy widget")
+
+    update_data = payload.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(widget, key, value)
+
+    db.commit()
+    db.refresh(widget)
+    return widget
+
+
+@app.delete("/api/dashboard/widgets/{widget_id}", status_code=204)
+def delete_dashboard_widget(widget_id: int, db: Session = Depends(get_db)):
+    widget = db.query(models.DashboardWidget).filter(models.DashboardWidget.id == widget_id).first()
+    if widget is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy widget")
+    db.delete(widget)
+    db.commit()
+    return
+
+
+@app.post("/api/dashboard/widgets/reorder")
+def reorder_dashboard_widgets(
+    order: list[int],
+    db: Session = Depends(get_db),
+):
+    for position, widget_id in enumerate(order):
+        widget = db.query(models.DashboardWidget).filter(models.DashboardWidget.id == widget_id).first()
+        if widget:
+            widget.position = position
+    db.commit()
+    return {"message": f"Đã cập nhật thứ tự cho {len(order)} widgets"}
+
+
+# ================================================================
+# Phase 3 — REPORT SERVICE
+# ================================================================
+
+def _build_report_response(report: models.Report) -> schemas.ReportResponse:
+    """Chuyển đổi ORM Report → Pydantic Response."""
+    return schemas.ReportResponse(
+        id=report.id,
+        name=report.name,
+        report_type=report.report_type,
+        format=report.format,
+        date_from=report.date_from,
+        date_to=report.date_to,
+        zone_ids=report.zone_ids,
+        metrics=report.metrics,
+        status=report.status,
+        file_path=report.file_path,
+        file_size=report.file_size,
+        created_by=report.created_by,
+        created_at=report.created_at,
+        completed_at=report.completed_at,
+    )
+
+
+def _generate_csv(data: list[dict], columns: list[str]) -> bytes:
+    """Tạo file CSV từ danh sách dict."""
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=columns, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(data)
+    return output.getvalue().encode("utf-8")
+
+
+def _generate_excel(data: list[dict], columns: list[str], sheet_name: str = "Report") -> bytes:
+    """Tạo file Excel (.xlsx) từ danh sách dict."""
+    try:
+        import pandas as pd
+        df = pd.DataFrame(data, columns=columns)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+        return output.getvalue()
+    except ImportError:
+        raise HTTPException(status_code=500, detail="pandas/openpyxl chưa được cài đặt.")
+
+
+# ─── Phase 4: PDF Generation ────────────────────────────────────
+def _generate_pdf(data: list[dict], columns: list[str], report_name: str,
+                  date_from: str, date_to: str, zone_names: list[str] = None) -> bytes:
+    """Tạo file PDF báo cáo với biểu đồ và bảng dữ liệu."""
+    if not HAS_REPORTLAB:
+        raise HTTPException(status_code=500, detail="reportlab chưa được cài đặt. Chạy: pip install reportlab")
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4),
+                            title=report_name,
+                            author="SmartFarm HK252")
+
+    styles = getSampleStyleSheet()
+
+    # Custom styles - use Unicode font for Vietnamese support
+    title_style = ParagraphStyle(
+        'CustomTitle', parent=styles['Title'],
+        fontSize=20, leading=24, alignment=TA_CENTER,
+        textColor=colors.HexColor('#1b5e20'),
+        fontName=UNICODE_FONT
+    )
+    subtitle_style = ParagraphStyle(
+        'CustomSub', parent=styles['Normal'],
+        fontSize=12, leading=16, alignment=TA_CENTER,
+        textColor=colors.HexColor('#424242'),
+        fontName=UNICODE_FONT
+    )
+    header_style = ParagraphStyle(
+        'CustomHeader', parent=styles['Heading2'],
+        fontSize=14, leading=18, textColor=colors.HexColor('#1b5e20'),
+        fontName=UNICODE_FONT
+    )
+
+    elements = []
+
+    # Title
+    elements.append(Spacer(1, 20 * mm))
+    elements.append(Paragraph(report_name, title_style))
+    elements.append(Spacer(1, 6 * mm))
+    elements.append(Paragraph(f"📅 {date_from} → {date_to}", subtitle_style))
+    if zone_names:
+        elements.append(Spacer(1, 4 * mm))
+        elements.append(Paragraph(f"📍 Khu vực: {', '.join(zone_names)}", subtitle_style))
+    elements.append(Spacer(1, 12 * mm))
+
+    # Summary stats
+    elements.append(Paragraph("📊 Tóm tắt dữ liệu", header_style))
+    elements.append(Spacer(1, 4 * mm))
+
+    metric_labels = {"temperature": "🌡️ Nhiệt độ (°C)", "humidity": "💧 Độ ẩm (%)", "light": "☀️ Ánh sáng (Lux)"}
+    summary_data = []
+    for col in columns:
+        if col in ("zone_id", "zone_name", "measured_at"):
+            continue
+        values = [float(r[col]) for r in data if r.get(col) is not None]
+        if values:
+            summary_data.append([
+                metric_labels.get(col, col),
+                f"{min(values):.2f}",
+                f"{max(values):.2f}",
+                f"{sum(values) / len(values):.2f}",
+                str(len(values))
+            ])
+
+    if summary_data:
+        summary_table = Table(
+            [["Chỉ số", "Min", "Max", "Trung bình", "Số mẫu"]] + summary_data,
+            colWidths=[120 * mm, 70 * mm, 70 * mm, 80 * mm, 60 * mm]
+        )
+        summary_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1b5e20')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('FONTNAME', (0, 0), (-1, 0), UNICODE_FONT_BOLD),
+            ('FONTSIZE', (0, 0), (-1, 0), 10),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTSIZE', (0, 1), (-1, -1), 9),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f5f5f5')]),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ]))
+        elements.append(summary_table)
+        elements.append(Spacer(1, 10 * mm))
+
+    # Detail table
+    elements.append(KeepTogether([
+        Paragraph("📋 Chi tiết dữ liệu", header_style),
+        Spacer(1, 4 * mm),
+    ]))
+
+    display_columns = ["zone_name" if c == "zone_name" else
+                       "measured_at" if c == "measured_at" else
+                       c.capitalize() for c in columns]
+
+    table_data = [display_columns]
+    for row in data[:200]:  # Giới hạn 200 dòng cho PDF
+        table_data.append([str(row.get(c, ''))[:30] for c in columns])
+
+    col_widths = [max(100 * mm, 300 * mm // len(columns))] * len(columns)
+    detail_table = Table(table_data, colWidths=col_widths, repeatRows=1)
+    detail_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2e7d32')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, 0), UNICODE_FONT_BOLD),
+        ('FONTSIZE', (0, 0), (-1, 0), 8),
+        ('FONTSIZE', (0, 1), (-1, -1), 7),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f0f8f0')]),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+    ]))
+    elements.append(detail_table)
+
+    # Footer
+    elements.append(Spacer(1, 15 * mm))
+    elements.append(Paragraph(
+        f"--- Tạo bởi SmartFarm HK252 · {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} ---",
+        subtitle_style
+    ))
+
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def _fetch_report_data(
+    db: Session,
+    zone_ids: Optional[list[int]],
+    metrics: Optional[list[str]],
+    date_from: datetime,
+    date_to: datetime,
+) -> tuple[list[dict], list[str]]:
+    """
+    Query telemetry_data theo filter, trả về (rows, columns).
+    Mỗi row là dict: {zone_id, zone_name, temperature, humidity, light, measured_at}
+    """
+    q = db.query(
+        models.TelemetryData.zone_id,
+        models.Zone.name.label("zone_name"),
+        models.TelemetryData.temperature,
+        models.TelemetryData.humidity,
+        models.TelemetryData.light,
+        models.TelemetryData.measured_at,
+    ).join(models.Zone, models.TelemetryData.zone_id == models.Zone.id).filter(
+        models.TelemetryData.measured_at >= date_from,
+        models.TelemetryData.measured_at <= date_to,
+    )
+
+    if zone_ids:
+        q = q.filter(models.TelemetryData.zone_id.in_(zone_ids))
+
+    rows_raw = q.order_by(models.TelemetryData.measured_at.asc()).all()
+
+    all_metrics = ["temperature", "humidity", "light"]
+    if metrics:
+        selected_metrics = [m for m in metrics if m in all_metrics]
+    else:
+        selected_metrics = all_metrics
+
+    columns = ["zone_id", "zone_name", "measured_at"] + selected_metrics
+
+    rows = []
+    for row in rows_raw:
+        r: dict = {
+            "zone_id": row.zone_id,
+            "zone_name": row.zone_name,
+            "measured_at": row.measured_at.isoformat() if row.measured_at else None,
+        }
+        for m in selected_metrics:
+            r[m] = getattr(row, m)
+        rows.append(r)
+
+    return rows, columns
+
+
+def _generate_report_file_sync(report_id: int, db: Session):
+    """Tạo file báo cáo đồng bộ (gọi từ background task)."""
+    db_report = db.query(models.Report).filter(models.Report.id == report_id).first()
+    if not db_report:
+        return
+
+    try:
+        db_report.status = "processing"
+        db.commit()
+        db.refresh(db_report)
+
+        _from = db_report.date_from
+        _to = db_report.date_to
+        if _from.tzinfo is None:
+            _from = _from.replace(tzinfo=timezone.utc)
+        if _to.tzinfo is None:
+            _to = _to.replace(tzinfo=timezone.utc)
+
+        rows, columns = _fetch_report_data(db, db_report.zone_ids, db_report.metrics, _from, _to)
+
+        if not rows:
+            db_report.status = "completed"
+            db_report.file_path = None
+            db_report.file_size = 0
+            db_report.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            db.refresh(db_report)
+            return
+
+        fmt = db_report.format
+        if fmt == "csv":
+            file_content = _generate_csv(rows, columns)
+            ext = "csv"
+        elif fmt == "xlsx":
+            file_content = _generate_excel(rows, columns)
+            ext = "xlsx"
+        elif fmt == "pdf":
+            zone_names = None
+            if db_report.zone_ids:
+                zones = db.query(models.Zone).filter(models.Zone.id.in_(db_report.zone_ids)).all()
+                zone_names = [z.name for z in zones]
+            file_content = _generate_pdf(
+                rows, columns,
+                report_name=db_report.name,
+                date_from=_from.strftime("%Y-%m-%d %H:%M"),
+                date_to=_to.strftime("%Y-%m-%d %H:%M"),
+                zone_names=zone_names,
+            )
+            ext = "pdf"
+        else:
+            raise HTTPException(status_code=400, detail=f"Định dạng '{fmt}' không được hỗ trợ")
+
+        filename = f"report_{report_id}_{uuid.uuid4().hex[:8]}.{ext}"
+        file_path = REPORTS_DIR / filename
+        file_path.write_bytes(file_content)
+
+        db_report.status = "completed"
+        db_report.file_path = str(file_path)
+        db_report.file_size = len(file_content)
+        db_report.completed_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(db_report)
+
+    except Exception as e:
+        db_report.status = "failed"
+        db.commit()
+        db.refresh(db_report)
+        raise
+
+
+@app.post("/api/reports/generate", response_model=schemas.ReportResponse, status_code=201)
+def generate_report(
+    payload: schemas.ReportCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """
+    Tạo báo cáo mới (async).
+    1. Tạo record trong bảng reports (status=pending)
+    2. Đẩy task tạo file vào background
+    3. Trả về report_id để client poll trạng thái
+    """
+    report = models.Report(
+        name=payload.name,
+        report_type="custom",
+        format=payload.format,
+        date_from=payload.date_from,
+        date_to=payload.date_to,
+        zone_ids=payload.zone_ids,
+        metrics=payload.metrics,
+        status="pending",
+        created_by=None,  # TODO: lấy từ JWT current_user
+    )
+    db.add(report)
+    db.commit()
+    db.refresh(report)
+
+    # Đẩy task tạo file vào background
+    background_tasks.add_task(_generate_report_file_sync, report.id, db)
+
+    return _build_report_response(report)
+
+
+@app.get("/api/reports/", response_model=list[schemas.ReportResponse])
+def list_reports(db: Session = Depends(get_db)):
+    """Lấy danh sách tất cả báo cáo đã tạo."""
+    reports = db.query(models.Report).order_by(models.Report.created_at.desc()).all()
+    return [_build_report_response(r) for r in reports]
+
+
+@app.get("/api/reports/{report_id}", response_model=schemas.ReportResponse)
+def get_report(report_id: int, db: Session = Depends(get_db)):
+    """Lấy chi tiết báo cáo theo ID."""
+    report = db.query(models.Report).filter(models.Report.id == report_id).first()
+    if report is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy báo cáo")
+    return _build_report_response(report)
+
+
+@app.get("/api/reports/{report_id}/download")
+def download_report(report_id: int, db: Session = Depends(get_db)):
+    """Tải file báo cáo về."""
+    report = db.query(models.Report).filter(models.Report.id == report_id).first()
+    if report is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy báo cáo")
+    if report.status != "completed":
+        raise HTTPException(status_code=400, detail="Báo cáo chưa hoàn thành")
+    if report.file_path is None:
+        raise HTTPException(status_code=404, detail="File báo cáo không tồn tại")
+
+    file_path = Path(report.file_path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File không tồn tại trên server")
+
+    media_types = {
+        "csv": "text/csv",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pdf": "application/pdf",
+    }
+    media_type = media_types.get(report.format, "application/octet-stream")
+    return StreamingResponse(
+        file_path.open("rb"),
+        media_type=media_type,
+        headers={"Content-Disposition": f"attachment; filename={file_path.name}"}
+    )
+
+
+@app.delete("/api/reports/{report_id}", status_code=204)
+def delete_report(report_id: int, db: Session = Depends(get_db)):
+    """Xóa báo cáo."""
+    report = db.query(models.Report).filter(models.Report.id == report_id).first()
+    if report is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy báo cáo")
+
+    if report.file_path:
+        try:
+            Path(report.file_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    db.delete(report)
+    db.commit()
+    return
+
+
+# ================================================================
+# Phase 4 — SCHEDULED REPORTS (APScheduler)
+# ================================================================
+
+def _get_scheduler() -> Optional[BackgroundScheduler]:
+    """Singleton scheduler instance."""
+    global _report_scheduler
+    if _report_scheduler is None and APSCHEDULER_AVAILABLE:
+        _report_scheduler = BackgroundScheduler()
+        _report_scheduler.start()
+    return _report_scheduler
+
+
+def _scheduled_report_job(report_config: dict):
+    """Job tạo báo cáo theo lịch."""
+    db = SessionLocal()
+    try:
+        report = models.Report(
+            name=report_config["name"],
+            report_type="scheduled",
+            format=report_config.get("format", "csv"),
+            date_from=report_config["date_from"],
+            date_to=report_config["date_to"],
+            zone_ids=report_config.get("zone_ids"),
+            metrics=report_config.get("metrics"),
+            status="processing",
+            created_by=report_config.get("created_by"),
+        )
+        db.add(report)
+        db.commit()
+        db.refresh(report)
+        _generate_report_file_sync(report.id, db)
+    except Exception as e:
+        print(f"[ScheduledReport] Error: {e}")
+    finally:
+        db.close()
+
+
+@app.post("/api/reports/schedule")
+def schedule_report(payload: schemas.ScheduledReportCreate, db: Session = Depends(get_db)):
+    """Đặt lịch tạo báo cáo tự động (cron expression)."""
+    scheduler = _get_scheduler()
+    if scheduler is None:
+        raise HTTPException(status_code=500, detail="APScheduler chưa được cài đặt.")
+
+    # Tạo report record với status=scheduled
+    report = models.Report(
+        name=payload.name,
+        report_type="scheduled",
+        format=payload.format,
+        date_from=payload.date_from,
+        date_to=payload.date_to,
+        zone_ids=payload.zone_ids,
+        metrics=payload.metrics,
+        status="scheduled",
+        created_by=None,
+    )
+    db.add(report)
+    db.commit()
+    db.refresh(report)
+
+    # Lưu config cho job
+    job_config = {
+        "report_id": report.id,
+        "name": payload.name,
+        "format": payload.format,
+        "date_from": payload.date_from,
+        "date_to": payload.date_to,
+        "zone_ids": payload.zone_ids,
+        "metrics": payload.metrics,
+    }
+
+    trigger = CronTrigger(
+        year=payload.cron_year or "*",
+        month=payload.cron_month or "*",
+        day=payload.cron_day or "*",
+        week=payload.cron_week or "*",
+        day_of_week=payload.cron_day_of_week or "*",
+        hour=payload.cron_hour or "0",
+        minute=payload.cron_minute or "0",
+        second=payload.cron_second or "0",
+        timezone="Asia/Bangkok",
+    )
+
+    scheduler.add_job(
+        _scheduled_report_job,
+        trigger=trigger,
+        args=[job_config],
+        id=f"scheduled_report_{report.id}",
+        replace_existing=True,
+    )
+
+    return {"message": f"Đã đặt lịch báo cáo #{report.id}", "report_id": report.id}
+
+
+@app.get("/api/reports/schedule/list")
+def list_scheduled_reports(db: Session = Depends(get_db)):
+    """Lấy danh sách báo cáo đã đặt lịch."""
+    reports = db.query(models.Report).filter(
+        models.Report.report_type == "scheduled"
+    ).order_by(models.Report.created_at.desc()).all()
+    return [_build_report_response(r) for r in reports]
+
+
+@app.delete("/api/reports/schedule/{report_id}")
+def cancel_scheduled_report(report_id: int, db: Session = Depends(get_db)):
+    """Hủy báo cáo đã đặt lịch."""
+    scheduler = _get_scheduler()
+    report = db.query(models.Report).filter(models.Report.id == report_id).first()
+    if report is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy báo cáo")
+
+    if scheduler:
+        try:
+            scheduler.remove_job(f"scheduled_report_{report_id}")
+        except Exception:
+            pass
+
+    db.delete(report)
+    db.commit()
+    return {"message": f"Đã hủy báo cáo lịch #{report_id}"}
+
+
+# ================================================================
+# Phase 4 — DASHBOARD WIDGET SERVICE (mở rộng)
+# ================================================================
+
+@app.get("/api/dashboard/widget-types")
+def get_widget_types():
+    """Trả về danh sách widget types khả dụng."""
+    return {
+        "types": [
+            {"key": "stat_card", "label": "Thẻ thống kê", "config_example": {"metric": "temperature", "zone_id": None, "agg": "avg"}},
+            {"key": "line_chart", "label": "Biểu đồ đường", "config_example": {"metrics": ["temperature", "humidity"], "zone_ids": [1, 2], "period": "24h"}},
+            {"key": "bar_chart", "label": "Biểu đồ cột", "config_example": {"metric": "humidity", "group_by": "zone", "period": "7d"}},
+            {"key": "gauge", "label": "Đồng hồ đo", "config_example": {"metric": "temperature", "zone_id": 1, "min": 0, "max": 50}},
+            {"key": "live_table", "label": "Bảng realtime", "config_example": {"columns": ["zone", "temperature", "humidity", "light", "timestamp"]}},
+        ]
+    }
+
+
+# ── Startup / Shutdown ──────────────────────────────────────────
+@app.on_event("startup")
+async def startup_event():
+    """Khởi tạo scheduler khi server start."""
+    global _report_scheduler
+    if APSCHEDULER_AVAILABLE and _report_scheduler is None:
+        _report_scheduler = BackgroundScheduler()
+        _report_scheduler.start()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Dọn dẹp khi server shutdown."""
+    global _report_scheduler
+    if _report_scheduler:
+        _report_scheduler.shutdown()
+        _report_scheduler = None
+    if REDIS_AVAILABLE:
+        try:
+            REDIS_CLIENT.close()
+        except Exception:
+            pass
