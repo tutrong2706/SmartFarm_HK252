@@ -53,3 +53,11 @@ weasyprint==62.3
 celery==5.4.0
 redis==5.0.8
 APScheduler==3.10.4
+# AI & LLM - For Chatbot & RAG (using compatible latest versions)
+langchain>=0.2.0
+langchain-google-genai>=4.2.0
+langchain-community>=0.0.29
+google-generativeai>=0.5.4
+chromadb>=0.4.0
+faiss-cpu>=1.7.4
+
