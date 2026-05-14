@@ -14,6 +14,8 @@ import SensorsIcon      from '@mui/icons-material/Sensors'
 import GrassIcon        from '@mui/icons-material/Grass'
 import SettingsIcon     from '@mui/icons-material/Settings'
 import LogoutIcon       from '@mui/icons-material/Logout'
+import AssessmentIcon   from '@mui/icons-material/Assessment'
+import BarChartIcon     from '@mui/icons-material/BarChart'
 import ChatBot          from './components/ChatBot'
 import './dashboard.css'
 
@@ -24,6 +26,8 @@ const NAV_ITEMS = [
   { label: 'Tổng quan',          icon: <DashboardIcon fontSize="small" />, path: '/dashboard',           group: 'nav' },
   { label: 'Quản lý Thiết bị',   icon: <SensorsIcon   fontSize="small" />, path: '/device-management',   group: 'nav' },
   { label: 'Cấu hình Cây trồng', icon: <GrassIcon     fontSize="small" />, path: '/crop-settings',        group: 'nav' },
+  { label: 'Report Builder',     icon: <AssessmentIcon fontSize="small" />, path: '/reports/builder',     group: 'nav' },
+  { label: 'Lịch sử Báo cáo',   icon: <BarChartIcon  fontSize="small" />, path: '/reports/history',     group: 'nav' },
   { label: 'Cài đặt',            icon: <SettingsIcon  fontSize="small" />, path: '/settings',             group: 'sys' },
 ]
 

@@ -33,6 +33,8 @@ import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline'
 import AutorenewIcon from '@mui/icons-material/Autorenew'
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined'
 import DoneAllIcon from '@mui/icons-material/DoneAll'
+import AssessmentIcon from '@mui/icons-material/Assessment'
+import BarChartIcon from '@mui/icons-material/BarChart'
 import Badge from '@mui/material/Badge'
 
 const drawerWidth = 240
@@ -269,6 +271,18 @@ export default function Dashboard() {
                 <ListItemButton className="sidebar-item" onClick={() => navigate('/crop-settings')}>
                   <ListItemIcon><GrassIcon fontSize="small" /></ListItemIcon>
                   <ListItemText primary="Cấu hình Cây trồng" primaryTypographyProps={{ fontSize: '0.85rem' }} />
+                </ListItemButton>
+              </ListItem>
+              <ListItem disablePadding>
+                <ListItemButton className="sidebar-item" onClick={() => navigate('/reports/builder')}>
+                  <ListItemIcon><AssessmentIcon fontSize="small" /></ListItemIcon>
+                  <ListItemText primary="Report Builder" primaryTypographyProps={{ fontSize: '0.85rem' }} />
+                </ListItemButton>
+              </ListItem>
+              <ListItem disablePadding>
+                <ListItemButton className="sidebar-item" onClick={() => navigate('/reports/history')}>
+                  <ListItemIcon><BarChartIcon fontSize="small" /></ListItemIcon>
+                  <ListItemText primary="Lịch sử Báo cáo" primaryTypographyProps={{ fontSize: '0.85rem' }} />
                 </ListItemButton>
               </ListItem>
             </List>

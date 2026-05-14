@@ -4,7 +4,9 @@ import Dashboard from './Dashboard'
 import CropSettings from './CropSettings'
 import DeviceManagement from './DeviceManagement'
 import ZoneDetail from './ZoneDetail'
-  
+import ReportBuilder from './ReportBuilder'
+import ReportHistory from './ReportHistory'
+
 // Component kiểm tra quyền truy cập (Người gác cổng)
 const ProtectedRoute = ({ children }) => {
   const token = localStorage.getItem('access_token')
@@ -22,18 +24,38 @@ function App() {
       <Routes>
         {/* Đường dẫn mặc định đẩy về Login */}
         <Route path="/" element={<Navigate to="/login" replace />} />
-        
+
         {/* Trang Đăng nhập */}
         <Route path="/login" element={<Login />} />
-        
+
         {/* Trang Dashboard (Đã được bảo vệ) */}
-        <Route 
-          path="/dashboard" 
+        <Route
+          path="/dashboard"
           element={
             <ProtectedRoute>
               <Dashboard />
             </ProtectedRoute>
-          } 
+          }
+        />
+
+        {/* Trang Report Builder */}
+        <Route
+          path="/reports/builder"
+          element={
+            <ProtectedRoute>
+              <ReportBuilder />
+            </ProtectedRoute>
+          }
+        />
+
+        {/* Trang Report History */}
+        <Route
+          path="/reports/history"
+          element={
+            <ProtectedRoute>
+              <ReportHistory />
+            </ProtectedRoute>
+          }
         />
 
         {/* Trang cấu hình cây trồng (bảo vệ bằng token) */}

@@ -12,7 +12,7 @@ const farmTheme = createTheme({
     primary: { main: '#2e7d32', light: '#4caf50', dark: '#1b5e20', contrastText: '#ffffff' },
     background: { default: '#f1f8e9', paper: '#ffffff' },
   },
-  typography: { fontFamily: '"Roboto", "Helvetica", "Arial", sans-serif' },
+  typography: { fontFamily: '"Be Vietnam Pro", "Plus Jakarta Sans", "Inter", "Roboto", "Helvetica", "Arial", sans-serif' },
   shape: { borderRadius: 16 } // Bo góc form tròn trịa hơn một chút
 })
 
