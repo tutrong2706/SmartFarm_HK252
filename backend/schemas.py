@@ -141,3 +141,25 @@ class AlertLogResponse(BaseModel):
 
     class Config:
         from_attributes = False   # built manually in endpoints
+
+
+# ── AI Chatbot Schemas ──────────────────────────────────────
+
+class ChatMessage(BaseModel):
+    """Request schema cho chat endpoint"""
+    message: str
+    session_id: str = "default"
+
+
+class ChatResponse(BaseModel):
+    """Response schema cho chat endpoint"""
+    response: str
+    session_id: str
+    timestamp: datetime
+
+
+class ChatHistoryResponse(BaseModel):
+    """Response schema cho lấy lịch sử chat"""
+    messages: list
+    session_id: str
+    count: int

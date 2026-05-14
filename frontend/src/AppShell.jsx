@@ -14,6 +14,7 @@ import SensorsIcon      from '@mui/icons-material/Sensors'
 import GrassIcon        from '@mui/icons-material/Grass'
 import SettingsIcon     from '@mui/icons-material/Settings'
 import LogoutIcon       from '@mui/icons-material/Logout'
+import ChatBot          from './components/ChatBot'
 import './dashboard.css'
 
 export const DRAWER_WIDTH = 240
@@ -126,6 +127,9 @@ export default function AppShell({ children, wsStatus }) {
       <Box component="main" className="dashboard-main">
         {children}
       </Box>
+
+      {/* ── AI Chatbot Widget ── */}
+      <ChatBot position="bottom-right" /> 
     </Box>
   )
 }

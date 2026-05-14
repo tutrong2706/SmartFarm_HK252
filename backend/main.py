@@ -11,6 +11,9 @@ from datetime import datetime, timezone
 import auth
 import models, schemas
 from database import engine, get_db
+from chatbot import chat_with_ai, clear_history, get_history
+from sql_agent import query_database
+from rag_system import retrieve_documents, format_retrieved_docs
 
 # Lệnh này yêu cầu SQLAlchemy tạo toàn bộ các bảng trong CSDL
 models.Base.metadata.create_all(bind=engine)
@@ -1009,3 +1012,271 @@ def delete_log(log_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Log không tồn tại")
     db.delete(entry)
     db.commit()
+
+
+# ==========================================
+# API CHO AI CHATBOT
+# ==========================================
+
+@app.post("/api/chat", response_model=schemas.ChatResponse)
+def chat_endpoint(chat_req: schemas.ChatMessage):
+    """
+    Chat với AI Assistant
+    
+    - message: Câu hỏi từ người dùng
+    - session_id: ID phiên chat (để lưu lịch sử)
+    
+    Example:
+    ```json
+    {
+        "message": "Nhiệt độ tối ưu cho cây cà chua là bao nhiêu?",
+        "session_id": "user123"
+    }
+    ```
+    """
+    try:
+        # Gọi chatbot service
+        ai_response = chat_with_ai(
+            user_query=chat_req.message,
+            session_id=chat_req.session_id,
+            context=None  # Có thể thêm context từ DB sau
+        )
+        
+        return schemas.ChatResponse(
+            response=ai_response,
+            session_id=chat_req.session_id,
+            timestamp=datetime.now(timezone.utc).replace(tzinfo=None)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Lỗi chatbot: {str(e)}"
+        )
+
+
+@app.delete("/api/chat/history/{session_id}")
+def clear_chat_history(session_id: str):
+    """Xóa lịch sử chat của một phiên"""
+    try:
+        clear_history(session_id)
+        return {"message": f"Đã xóa lịch sử chat của phiên {session_id}"}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Lỗi xóa lịch sử: {str(e)}"
+        )
+
+
+@app.get("/api/chat/health")
+def chat_health_check():
+    """Check xem chatbot service có hoạt động không"""
+    try:
+        # Test kết nối Gemini API
+        from ai_config import GEMINI_API_KEY
+        if not GEMINI_API_KEY:
+            return {
+                "status": "error",
+                "message": "GEMINI_API_KEY không được cấu hình"
+            }
+        return {
+            "status": "ok",
+            "message": "Chatbot service sẵn sàng",
+            "timestamp": datetime.now(timezone.utc).replace(tzinfo=None)
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e)
+        }
+
+
+# ==========================================
+# API CHO SQL AGENT (Text-to-SQL)
+# ==========================================
+
+@app.post("/api/query")
+def query_database_endpoint(query_request: dict):
+    """
+    Execute natural language query against SmartFarm database
+    
+    Request:
+    {
+        "question": "Có bao nhiêu khu vực trong hệ thống?",
+        "include_ai_explanation": true
+    }
+    
+    Response:
+    {
+        "success": true,
+        "query_result": "...",
+        "ai_explanation": "...",
+        "timestamp": "..."
+    }
+    """
+    try:
+        question = query_request.get("question", "")
+        include_explanation = query_request.get("include_ai_explanation", True)
+        
+        if not question:
+            raise HTTPException(status_code=400, detail="Question không được để trống")
+        
+        # Execute SQL query
+        db_result = query_database(question)
+        
+        response_data = {
+            "success": db_result["success"],
+            "query_result": db_result["result"],
+            "timestamp": datetime.now(timezone.utc).replace(tzinfo=None)
+        }
+        
+        # Optionally get AI explanation
+        if include_explanation and db_result["success"]:
+            explanation = chat_with_ai(
+                user_query=f"Hãy giải thích ngắn gọn kết quả này: {db_result['result']}",
+                session_id="query_explanation"
+            )
+            response_data["ai_explanation"] = explanation
+        
+        return response_data
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Lỗi truy vấn: {str(e)}"
+        )
+
+
+@app.get("/api/query/schema")
+def get_database_schema():
+    """
+    Get SmartFarm database schema information
+    Useful for understanding available tables and fields
+    """
+    try:
+        from sql_agent import get_schema_info
+        schema = get_schema_info()
+        return {
+            "success": True,
+            "schema": schema,
+            "timestamp": datetime.now(timezone.utc).replace(tzinfo=None)
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+# ==========================================
+# API CHO RAG SYSTEM (Retrieval-Augmented Generation)
+# ==========================================
+
+@app.post("/api/rag/retrieve")
+def retrieve_rag_documents(request: dict):
+    """
+    Retrieve relevant agricultural documents based on query
+    
+    Request:
+    {
+        "query": "Làm thế nào để ngăn chặn bệnh phấn trắng?",
+        "k": 3
+    }
+    
+    Response:
+    {
+        "success": true,
+        "documents": [
+            {
+                "content": "...",
+                "source": "tomato_cultivation.txt",
+                "relevance": "high"
+            }
+        ],
+        "timestamp": "2026-05-13T10:30:45"
+    }
+    """
+    try:
+        query = request.get("query", "")
+        k = request.get("k", 3)
+        
+        if not query:
+            raise HTTPException(status_code=400, detail="Query không được để trống")
+        
+        # Retrieve documents
+        docs = retrieve_documents(query, k=k)
+        
+        return {
+            "success": True,
+            "documents": docs,
+            "document_count": len(docs),
+            "timestamp": datetime.now(timezone.utc).replace(tzinfo=None)
+        }
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Lỗi RAG: {str(e)}"
+        )
+
+
+@app.get("/api/rag/status")
+def rag_status():
+    """
+    Check RAG system status and available documents
+    """
+    try:
+        from rag_system import get_rag_system
+        vector_store, retriever = get_rag_system()
+        
+        if vector_store is None:
+            return {
+                "status": "initializing",
+                "message": "Hệ thống RAG đang khởi tạo...",
+                "document_count": 0,
+                "timestamp": datetime.now(timezone.utc).replace(tzinfo=None)
+            }
+        
+        doc_count = vector_store._collection.count() if hasattr(vector_store, '_collection') else 0
+        
+        return {
+            "status": "ready",
+            "message": "Hệ thống RAG sẵn sàng",
+            "document_count": doc_count,
+            "vector_db": "ChromaDB",
+            "embedding_model": "Google Generative AI",
+            "timestamp": datetime.now(timezone.utc).replace(tzinfo=None)
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "timestamp": datetime.now(timezone.utc).replace(tzinfo=None)
+        }
+
+
+@app.post("/api/rag/reload")
+def reload_rag_documents():
+    """
+    Reload RAG documents from disk (for development/testing)
+    Useful when new documents are added to the documents folder
+    """
+    try:
+        import importlib
+        import rag_system
+        importlib.reload(rag_system)
+        
+        # Reinitialize RAG system
+        rag_system._vector_store = None
+        rag_system._retriever = None
+        rag_system.init_rag_system()
+        
+        return {
+            "success": True,
+            "message": "RAG documents reloaded successfully",
+            "timestamp": datetime.now(timezone.utc).replace(tzinfo=None)
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Lỗi reload: {str(e)}"
+        )
