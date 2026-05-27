@@ -133,7 +133,13 @@ export default function ZoneDetail() {
         try {
           const d = JSON.parse(e.data)
           if (String(d.zone_id) !== String(id)) return
-          setLiveData(d)
+          setLiveData(prev => ({
+            temperature: '--',
+            humidity: '--',
+            light: '--',
+            ...prev,
+            ...d
+          }))
           // append to chart history
           const ts = new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
           setChartData(prev => {
@@ -278,7 +284,7 @@ export default function ZoneDetail() {
           <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 3, mb: 3 }}>
             {sensorCards.map(({ key, label, unit, Icon, color, bg, border }) => {
               const raw = liveData[key]
-              const val = raw !== '--' ? `${raw}${unit}` : '--'
+              const val = raw != null ? `${raw}${unit}` : '--'
               return (
                 <Card key={key} elevation={0} sx={{ p: 3, bgcolor: bg,
                   border: `1px solid ${border}`, borderRadius: 3 }}>

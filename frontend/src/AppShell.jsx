@@ -47,7 +47,7 @@ export default function AppShell({ children, wsStatus }) {
   }[wsStatus] : null
 
   return (
-    <Box className="dashboard-root">
+    <Box className="dashboard-root" sx={{ display: 'flex' }}>
       {/* ── AppBar ── */}
       <AppBar position="fixed" elevation={0}
         sx={{ zIndex: (t) => t.zIndex.drawer + 1, bgcolor: '#1b5e20',

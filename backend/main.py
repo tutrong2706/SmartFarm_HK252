@@ -1,8 +1,14 @@
 import os
+from dotenv import load_dotenv  # <-- Thêm dòng này
+
+# Nạp các biến môi trường từ file .env
+load_dotenv() # <-- Gọi hàm này ngay lập tức
 import csv
 import io
 import uuid
+from pydantic import BaseModel
 import json
+import base64
 import requests
 import threading
 from pathlib import Path
@@ -21,6 +27,7 @@ from database import engine, get_db
 from chatbot import chat_with_ai, clear_history, get_history
 from sql_agent import query_database
 from rag_system import retrieve_documents, format_retrieved_docs
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # ── Phase 4: Bổ sung ──────────────────────────────────────────────
 try:
@@ -29,7 +36,7 @@ try:
     from reportlab.lib.units import mm
     from reportlab.platypus import (
         SimpleDocTemplate, Table, TableStyle, Paragraph,
-        Spacer, PageBreak, Image, KeepTogether
+        Spacer, PageBreak, Image as RLImage, KeepTogether
     )
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.enums import TA_CENTER, TA_LEFT
@@ -389,41 +396,42 @@ def update_crop_setting(crop_id: int, crop_data: schemas.CropSettingCreate, db: 
                   )
 
     if not old_auto_mode and new_auto_mode:
-        zones = db.query(models.Zone).filter(models.Zone.crop_setting_id == crop_id).all()
-        for zone in zones:
-            if zone.id in _last_telemetry:
-                telemetry = _last_telemetry[zone.id]
-                temp = telemetry.get("temperature")
-                humid = telemetry.get("humidity")
-                light = telemetry.get("light")
+        try:
+            zones = db.query(models.Zone).filter(models.Zone.crop_setting_id == crop_id).all()
+            for zone in zones:
+                if zone.id in _last_telemetry:
+                    telemetry = _last_telemetry[zone.id]
+                    temp = telemetry.get("temperature")
+                    humid = telemetry.get("humidity")
+                    light = telemetry.get("light")
 
-                def _find_actuator(type_name: str):
-                    for dev in zone.devices:
-                        dt = db.query(models.DeviceType).filter(models.DeviceType.id == dev.type_id).first()
-                        if dt and dt.category == "ACTUATOR" and type_name.lower() in dt.name.lower():
-                            return dev
-                    return None
+                    def _find_actuator(type_name: str):
+                        for dev in zone.devices:
+                            dt = db.query(models.DeviceType).filter(models.DeviceType.id == dev.type_id).first()
+                            if dt and dt.category == "ACTUATOR" and type_name.lower() in dt.name.lower():
+                                return dev
+                        return None
 
-                def _auto_set(device, target_active: bool, action_desc: str, device_type: str = None, metric: str = None, value: float = None, threshold: float = None):
-                    if device is None:
-                        if device_type and metric and value is not None and threshold is not None:
-                            _log_missing_device(db, zone.id, device_type, metric, value, threshold)
-                        return
-                    if device.is_active == target_active:
-                        return
-                    device.is_active = target_active
-                    db.commit()
-                    db.refresh(device)
-                    log_event(db,
-                              log_type="automation",
-                              severity="success",
-                              title=f"{'Bật' if target_active else 'Tắt'} tự động — {device.name}",
-                              message=(f"🔄 Hệ thống tự động {action_desc} tại {zone.name} "
-                                     f"({device.name})."),
-                              zone_id=zone.id,
-                              device_id=device.id,
-                              actor="SYSTEM",
-                              )
+                    def _auto_set(device, target_active: bool, action_desc: str, device_type: str = None, metric: str = None, value: float = None, threshold: float = None):
+                        if device is None:
+                            if device_type and metric and value is not None and threshold is not None:
+                                _log_missing_device(db, zone.id, device_type, metric, value, threshold)
+                            return
+                        if device.is_active == target_active:
+                            return
+                        device.is_active = target_active
+                        db.commit()
+                        db.refresh(device)
+                        log_event(db,
+                                  log_type="automation",
+                                  severity="success",
+                                  title=f"{'Bật' if target_active else 'Tắt'} tự động — {device.name}",
+                                  message=(f"🔄 Hệ thống tự động {action_desc} tại {zone.name} "
+                                         f"({device.name})."),
+                                  zone_id=zone.id,
+                                  device_id=device.id,
+                                  actor="SYSTEM",
+                                  )
 
                 if temp is not None:
                     if temp > crop.temp_max:
@@ -434,7 +442,7 @@ def update_crop_setting(crop_id: int, crop_data: schemas.CropSettingCreate, db: 
                                       title=f"Nhiệt độ vượt ngưỡng — {zone.name}",
                                       message=(f"⚠️ Nhiệt độ {zone.name} đã lên {temp}°C "
                                              f"(Ngưỡng tối đa: {crop.temp_max}°C). Nguy cơ héo lá!"),
-                                      zone_id=zone_id,
+                                      zone_id=zone.id,
                                       metric_key="temperature",
                                       metric_value=float(temp),
                                       threshold=float(crop.temp_max),
@@ -542,7 +550,10 @@ def update_crop_setting(crop_id: int, crop_data: schemas.CropSettingCreate, db: 
                         if crop.auto_mode:
                             rly = _find_actuator("relay")
                             _auto_set(rly, False, "tắt lưới che nắng — ánh sáng đã ổn định", "relay", "ánh sáng", light, crop.light_max)
-        db.commit()
+            db.commit()
+        except Exception as e:
+            print(f"Error in auto_mode activation: {e}")
+            db.rollback()
 
     for field, value in new_vals.items():
         setattr(crop, field, value)
@@ -588,13 +599,25 @@ AIO_KEY = os.getenv('ADAFRUIT_IO_KEY', 'YOUR_ADAFRUIT_AIO_KEY')
 
 def _publish_adafruit(feed_key: str, value: str):
     def run():
+        # Kiểm tra ngay xem file .env có được nạp đúng không
+        if not AIO_USERNAME or not AIO_KEY:
+            print("❌ [LỖI] Chưa cấu hình ADAFRUIT_IO_USERNAME hoặc ADAFRUIT_IO_KEY trong file .env")
+            return
+
         try:
             url = f"https://io.adafruit.com/api/v2/{AIO_USERNAME}/feeds/{feed_key}/data"
             headers = {"X-AIO-Key": AIO_KEY, "Content-Type": "application/json"}
             payload = {"datum": {"value": value}}
-            requests.post(url, json=payload, headers=headers, timeout=5)
-        except Exception:
-            pass
+            
+            resp = requests.post(url, json=payload, headers=headers, timeout=5)
+            
+            # Ép in ra kết quả thay vì dùng "pass"
+            if resp.status_code == 200:
+                print(f"✅ [ADAFRUIT] Đã gửi thành công giá trị {value} tới feed: {feed_key}")
+            else:
+                print(f"❌ [ADAFRUIT] Lỗi từ Cloud: {resp.status_code} - {resp.text}")
+        except Exception as e:
+            print(f"❌ [ADAFRUIT] Lỗi kết nối mạng: {e}")
 
     threading.Thread(target=run, daemon=True).start()
 
@@ -644,7 +667,33 @@ def toggle_device(device_id: int, body: schemas.DeviceToggle, db: Session = Depe
         status="ONLINE" if device.is_active else "OFFLINE",
         is_active=device.is_active,
     )
+class SyncFeedPayload(BaseModel):
+    feed_key: str
+    is_active: bool
 
+@app.post("/api/devices/sync-feed")
+async def sync_device_from_feed(payload: SyncFeedPayload, db: Session = Depends(get_db)):
+    """API để Gateway báo cáo trạng thái thiết bị thực tế về hệ thống"""
+    devices = db.query(models.Device).filter(models.Device.pin_connector.contains(payload.feed_key)).all()
+    
+    if not devices:
+        return {"status": "ignored", "message": "Không tìm thấy thiết bị khớp với feed này"}
+
+    for device in devices:
+        if device.is_active != payload.is_active:
+            device.is_active = payload.is_active
+            db.commit()
+            db.refresh(device)
+            
+            # Bắn WebSocket để Frontend tự động giật công tắc mà không cần F5
+            ws_payload = {
+                "_type": "device_sync",
+                "device_id": device.id,
+                "is_active": device.is_active
+            }
+            await manager.broadcast(ws_payload)
+
+    return {"status": "success"}
 
 # ==========================================
 # API ĐĂNG KÝ VÀ ĐĂNG NHẬP
@@ -1471,6 +1520,7 @@ def _build_report_response(report: models.Report) -> schemas.ReportResponse:
         date_to=report.date_to,
         zone_ids=report.zone_ids,
         metrics=report.metrics,
+        widgets=report.widgets,
         status=report.status,
         file_path=report.file_path,
         file_size=report.file_size,
@@ -1478,6 +1528,182 @@ def _build_report_response(report: models.Report) -> schemas.ReportResponse:
         created_at=report.created_at,
         completed_at=report.completed_at,
     )
+
+
+def remove_diacritics(text: str) -> str:
+    """Remove Vietnamese diacritical marks."""
+    
+    if not isinstance(text, str):
+        return str(text)
+
+    import unicodedata
+
+    # Normalize unicode
+    text = unicodedata.normalize('NFD', text)
+
+    # Remove combining marks
+    text = ''.join(
+        char for char in text
+        if unicodedata.category(char) != 'Mn'
+    )
+
+    # Replace đ / Đ manually
+    text = text.replace('đ', 'd').replace('Đ', 'D')
+
+    return text
+
+
+def _render_widgets_to_csv(widgets: list[dict], date_from, date_to, zones, db) -> tuple[list[dict], list[str]]:
+    """
+    Render widget configuration to CSV data.
+    Returns (rows, columns) tuple suitable for CSV export.
+    """
+    if not widgets or len(widgets) == 0:
+        return [], []
+    
+    rows = []
+    all_columns = set()
+    
+    # Get telemetry data for date range - USE TelemetryData, not Telemetry
+    telemetries = db.query(models.TelemetryData).filter(
+        models.TelemetryData.measured_at.between(date_from, date_to)
+    ).order_by(models.TelemetryData.measured_at.asc()).all()
+    
+    telemetry_by_zone = {}
+    for t in telemetries:
+        zid = t.zone_id
+        if zid not in telemetry_by_zone:
+            telemetry_by_zone[zid] = []
+        telemetry_by_zone[zid].append(t)
+    
+    # Process each widget
+    for widget in widgets:
+        widget_type = widget.get('type', '')
+        widget_config = widget.get('config', {})
+        widget_id = widget.get('id', '')
+        
+        # Get zones for this widget (empty = all zones)
+        widget_zone_ids = widget_config.get('zoneIds', [])
+        if not widget_zone_ids:
+            widget_zone_ids = [z.id for z in zones] if zones else []
+        
+        # Prepare rows based on widget type
+        if widget_type == 'stat':
+            metric = widget_config.get('metric', 'temperature')
+            aggregation = widget_config.get('aggregation', 'avg')
+            
+            for zid in widget_zone_ids:
+                zone_data = telemetry_by_zone.get(zid, [])
+                if not zone_data:
+                    continue
+                    
+                values = [getattr(t, metric, 0) for t in zone_data if hasattr(t, metric) and getattr(t, metric) is not None]
+                if not values:
+                    continue
+                
+                if aggregation == 'avg':
+                    value = sum(values) / len(values)
+                elif aggregation == 'max':
+                    value = max(values)
+                elif aggregation == 'min':
+                    value = min(values)
+                elif aggregation == 'sum':
+                    value = sum(values)
+                else:
+                    value = 0
+                
+                zone_name = next((z.name for z in zones if z.id == zid), f'Zone {zid}')
+                col_name = f'{widget_type}_{widget_id}_{remove_diacritics(metric)}'
+                all_columns.add(col_name)
+                all_columns.add('Zone')
+                rows.append({
+                    'Zone': remove_diacritics(zone_name),
+                    col_name: round(value, 2)
+                })
+        
+        elif widget_type in ['chart', 'barchart']:
+            metrics = widget_config.get('metrics', ['temperature'])
+            
+            for zid in widget_zone_ids:
+                zone_data = telemetry_by_zone.get(zid, [])
+                if not zone_data:
+                    continue
+                
+                zone_name = next((z.name for z in zones if z.id == zid), f'Zone {zid}')
+                
+                for t in zone_data:
+                    row = {
+                        'Timestamp': t.measured_at.isoformat() if t.measured_at else '',
+                        'Zone': remove_diacritics(zone_name)
+                    }
+                    for metric in metrics:
+                        col_name = f'{widget_id}_{remove_diacritics(metric)}'
+                        val = getattr(t, metric, None)
+                        row[col_name] = round(val, 2) if val is not None else ''
+                        all_columns.add(col_name)
+                    
+                    all_columns.add('Timestamp')
+                    all_columns.add('Zone')
+                    rows.append(row)
+        
+        elif widget_type == 'table':
+            metric = widget_config.get('metric', 'temperature')
+            limit = widget_config.get('limit', 50)
+            
+            for zid in widget_zone_ids:
+                zone_data = telemetry_by_zone.get(zid, [])[:limit]
+                if not zone_data:
+                    continue
+                
+                zone_name = next((z.name for z in zones if z.id == zid), f'Zone {zid}')
+                
+                for t in zone_data:
+                    col_name = f'{widget_id}_{remove_diacritics(metric)}'
+                    val = getattr(t, metric, None)
+                    row = {
+                        'Timestamp': t.measured_at.isoformat() if t.measured_at else '',
+                        'Zone': remove_diacritics(zone_name),
+                        col_name: round(val, 2) if val is not None else ''
+                    }
+                    all_columns.add(col_name)
+                    all_columns.add('Timestamp')
+                    all_columns.add('Zone')
+                    rows.append(row)
+        
+        elif widget_type == 'summary':
+            for zid in widget_zone_ids:
+                zone_data = telemetry_by_zone.get(zid, [])
+                if not zone_data:
+                    continue
+                
+                zone_name = next((z.name for z in zones if z.id == zid), f'Zone {zid}')
+                
+                for metric in ['temperature', 'humidity', 'light']:
+                    values = [getattr(t, metric, 0) for t in zone_data if hasattr(t, metric) and getattr(t, metric) is not None]
+                    if not values:
+                        continue
+                    
+                    row = {
+                        'Zone': remove_diacritics(zone_name),
+                        'Metric': remove_diacritics(metric),
+                        f'{widget_id}_avg': round(sum(values) / len(values), 2),
+                        f'{widget_id}_max': max(values),
+                        f'{widget_id}_min': min(values),
+                        f'{widget_id}_sum': sum(values),
+                    }
+                    all_columns.update(['Zone', 'Metric', f'{widget_id}_avg', f'{widget_id}_max', f'{widget_id}_min', f'{widget_id}_sum'])
+                    rows.append(row)
+    
+    # Build final rows with all columns
+    columns = sorted(list(all_columns))
+    final_rows = []
+    for row in rows:
+        final_row = {}
+        for col in columns:
+            final_row[col] = row.get(col, '')
+        final_rows.append(final_row)
+    
+    return final_rows, columns
 
 
 def _generate_csv(data: list[dict], columns: list[str]) -> bytes:
@@ -1502,7 +1728,79 @@ def _generate_excel(data: list[dict], columns: list[str], sheet_name: str = "Rep
         raise HTTPException(status_code=500, detail="pandas/openpyxl chưa được cài đặt.")
 
 
-# ─── Phase 4: PDF Generation ────────────────────────────────────
+def _generate_pdf_with_widgets(widgets: list[dict], rows: list[dict], columns: list[str],
+                                report_name: str, date_from: str, date_to: str, zones: list = None) -> bytes:
+    """Tạo PDF báo cáo từ widget configuration kèm theo hình ảnh đã chụp từ Frontend."""
+    if not HAS_REPORTLAB:
+        raise HTTPException(status_code=500, detail="reportlab chưa được cài đặt.")
+    
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, title=report_name, author="SmartFarm HK252")
+    styles = getSampleStyleSheet()
+    
+    title_style = ParagraphStyle(
+        'CustomTitle', parent=styles['Title'], fontSize=20, leading=24, alignment=TA_CENTER,
+        textColor=colors.HexColor('#1b5e20'), fontName=UNICODE_FONT_BOLD
+    )
+    subtitle_style = ParagraphStyle(
+        'CustomSub', parent=styles['Normal'], fontSize=12, leading=16, alignment=TA_CENTER,
+        textColor=colors.HexColor('#424242'), fontName=UNICODE_FONT
+    )
+    header_style = ParagraphStyle(
+        'CustomHeader', parent=styles['Heading2'], fontSize=14, leading=18,
+        textColor=colors.HexColor('#1b5e20'), fontName=UNICODE_FONT_BOLD
+    )
+    
+    elements = []
+    
+    # Title Section
+    elements.append(Paragraph(report_name, title_style))
+    elements.append(Spacer(1, 6 * mm))
+    elements.append(Paragraph(f"📅 Từ {date_from} đến {date_to}", subtitle_style))
+    elements.append(Spacer(1, 15 * mm))
+    
+    widget_type_labels = {
+        'stat': 'Thống kê', 'chart': 'Biểu đồ đường', 'barchart': 'Biểu đồ cột',
+        'gauge': 'Đồng hồ đo', 'table': 'Bảng dữ liệu', 'summary': 'Tóm tắt'
+    }
+
+    # Render từng widget dưới dạng hình ảnh
+    for idx, widget in enumerate(widgets):
+        w_type = widget.get('type', '')
+        image_data = widget.get('image_data', '')
+
+        label = widget_type_labels.get(w_type, w_type.upper())
+        elements.append(Paragraph(f"{idx + 1}. {label}", header_style))
+        elements.append(Spacer(1, 4 * mm))
+
+        if image_data and "base64," in image_data:
+            try:
+                # Cắt bỏ phần header data:image/png;base64,
+                header, encoded = image_data.split(",", 1)
+                img_bytes = base64.b64decode(encoded)
+                img_buffer = io.BytesIO(img_bytes)
+                
+                # Chèn hình ảnh vào PDF (Set width khoảng 160mm cho vừa trang A4 dọc)
+                img_element = RLImage(img_buffer, width=160*mm, height=100*mm, kind='proportional')
+                elements.append(img_element)
+            except Exception as e:
+                elements.append(Paragraph(f"[Lỗi xử lý hình ảnh: {str(e)}]", styles['Normal']))
+        else:
+             elements.append(Paragraph("(Không có dữ liệu hình ảnh cho widget này)", styles['Italic']))
+
+        elements.append(Spacer(1, 15 * mm))
+
+    # Footer
+    elements.append(Spacer(1, 10 * mm))
+    elements.append(Paragraph(
+        f"--- Tạo bởi SmartFarm HK252 ---", subtitle_style
+    ))
+    
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 def _generate_pdf(data: list[dict], columns: list[str], report_name: str,
                   date_from: str, date_to: str, zone_names: list[str] = None) -> bytes:
     """Tạo file PDF báo cáo với biểu đồ và bảng dữ liệu."""
@@ -1696,9 +1994,26 @@ def _generate_report_file_sync(report_id: int, db: Session):
         if _to.tzinfo is None:
             _to = _to.replace(tzinfo=timezone.utc)
 
-        rows, columns = _fetch_report_data(db, db_report.zone_ids, db_report.metrics, _from, _to)
+        # =========================================================
+        # ĐOẠN SỬA LỖI: TỐI ƯU HÓA TRUY VẤN
+        # =========================================================
+        is_widget_report = db_report.widgets and len(db_report.widgets) > 0
+        fmt = db_report.format
+        rows, columns = [], []
+        zones = []
 
-        if not rows:
+        if is_widget_report:
+            zones = db.query(models.Zone).all()
+            # CHỈ fetch data nếu định dạng là CSV hoặc XLSX
+            # Nếu là PDF, bỏ qua vì ảnh đã được Frontend chụp rồi!
+            if fmt in ["csv", "xlsx"]:
+                rows, columns = _render_widgets_to_csv(db_report.widgets, _from, _to, zones, db)
+        else:
+            # Traditional report
+            rows, columns = _fetch_report_data(db, db_report.zone_ids, db_report.metrics, _from, _to)
+
+        # Đừng return early nếu là PDF chứa widget (vì PDF widget không cần biến rows)
+        if not rows and not (is_widget_report and fmt == "pdf"):
             db_report.status = "completed"
             db_report.file_path = None
             db_report.file_size = 0
@@ -1706,8 +2021,8 @@ def _generate_report_file_sync(report_id: int, db: Session):
             db.commit()
             db.refresh(db_report)
             return
+        # =========================================================
 
-        fmt = db_report.format
         if fmt == "csv":
             file_content = _generate_csv(rows, columns)
             ext = "csv"
@@ -1715,17 +2030,30 @@ def _generate_report_file_sync(report_id: int, db: Session):
             file_content = _generate_excel(rows, columns)
             ext = "xlsx"
         elif fmt == "pdf":
-            zone_names = None
-            if db_report.zone_ids:
-                zones = db.query(models.Zone).filter(models.Zone.id.in_(db_report.zone_ids)).all()
-                zone_names = [z.name for z in zones]
-            file_content = _generate_pdf(
-                rows, columns,
-                report_name=db_report.name,
-                date_from=_from.strftime("%Y-%m-%d %H:%M"),
-                date_to=_to.strftime("%Y-%m-%d %H:%M"),
-                zone_names=zone_names,
-            )
+            # Check if widget-based report
+            if is_widget_report:
+                file_content = _generate_pdf_with_widgets(
+                    widgets=db_report.widgets,
+                    rows=rows,
+                    columns=columns,
+                    report_name=db_report.name,
+                    date_from=_from.strftime("%Y-%m-%d %H:%M"),
+                    date_to=_to.strftime("%Y-%m-%d %H:%M"),
+                    zones=zones
+                )
+            else:
+                # Use traditional PDF generator
+                zone_names = None
+                if db_report.zone_ids:
+                    zones = db.query(models.Zone).filter(models.Zone.id.in_(db_report.zone_ids)).all()
+                    zone_names = [z.name for z in zones]
+                file_content = _generate_pdf(
+                    rows, columns,
+                    report_name=db_report.name,
+                    date_from=_from.strftime("%Y-%m-%d %H:%M"),
+                    date_to=_to.strftime("%Y-%m-%d %H:%M"),
+                    zone_names=zone_names,
+                )
             ext = "pdf"
         else:
             raise HTTPException(status_code=400, detail=f"Định dạng '{fmt}' không được hỗ trợ")
@@ -1742,10 +2070,11 @@ def _generate_report_file_sync(report_id: int, db: Session):
         db.refresh(db_report)
 
     except Exception as e:
+        print(f"LỖI TẠO BÁO CÁO NGẦM: {e}") # Thêm log in ra lỗi để dễ debug
         db_report.status = "failed"
         db.commit()
         db.refresh(db_report)
-        raise
+        # Bỏ dòng "raise" đi để không làm sập tiến trình ngầm
 
 
 @app.post("/api/reports/generate", response_model=schemas.ReportResponse, status_code=201)
@@ -1768,6 +2097,7 @@ def generate_report(
         date_to=payload.date_to,
         zone_ids=payload.zone_ids,
         metrics=payload.metrics,
+        widgets=payload.widgets,  # Widget-based report configuration
         status="pending",
         created_by=None,  # TODO: lấy từ JWT current_user
     )

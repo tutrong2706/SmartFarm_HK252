@@ -221,6 +221,7 @@ class ReportCreate(BaseModel):
     date_to: datetime
     zone_ids: Optional[list[int]] = None
     metrics: Optional[list[str]] = None
+    widgets: Optional[list[dict]] = None  # Widget-based report configuration
 
 
 class ReportResponse(BaseModel):
@@ -232,6 +233,7 @@ class ReportResponse(BaseModel):
     date_to: datetime
     zone_ids: Optional[list[int]] = None
     metrics: Optional[list[str]] = None
+    widgets: Optional[list[dict]] = None
     status: str
     file_path: Optional[str] = None
     file_size: Optional[int] = None
@@ -260,8 +262,10 @@ class ScheduledReportCreate(BaseModel):
     cron_hour: Optional[str] = "0"
     cron_minute: Optional[str] = "0"
     cron_second: Optional[str] = "0"
-        from_attributes = False   # built manually in endpoints
-
+    
+    
+    class Config:
+            from_attributes = False   # built manually in endpoints
 
 # ── AI Chatbot Schemas ──────────────────────────────────────
 

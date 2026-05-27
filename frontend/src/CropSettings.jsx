@@ -152,11 +152,22 @@ export default function CropSettings() {
   // ── Toggle auto_mode ───────────────────────────────────────────
   const handleToggleAuto = async (crop) => {
     try {
-      await axios.put(`${API}/api/crop-settings/${crop.id}`, {
-        ...crop, auto_mode: !crop.auto_mode
-      })
+      const payload = {
+        crop_name: crop.crop_name,
+        temp_min: crop.temp_min,
+        temp_max: crop.temp_max,
+        humid_min: crop.humid_min,
+        humid_max: crop.humid_max,
+        light_min: crop.light_min ?? null,
+        light_max: crop.light_max ?? null,
+        light_type: crop.light_type || 'SUN',
+        auto_mode: !crop.auto_mode
+      }
+      await axios.put(`${API}/api/crop-settings/${crop.id}`, payload)
       setCrops(prev => prev.map(c => c.id === crop.id ? { ...c, auto_mode: !c.auto_mode } : c))
-    } catch {
+      notify(`Đã ${!crop.auto_mode ? 'bật' : 'tắt'} chế độ tự động cho ${crop.crop_name}`, 'success')
+    } catch (err) {
+      console.error('Toggle auto_mode error:', err.response?.data || err.message)
       notify('Không thể cập nhật chế độ tự động', 'error')
     }
   }

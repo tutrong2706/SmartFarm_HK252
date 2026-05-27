@@ -133,6 +133,7 @@ class Report(Base):
     date_to = Column(DateTime(timezone=True), nullable=False)
     zone_ids = Column(JSON, nullable=True)  # [1, 2, 3] hoặc null = all
     metrics = Column(JSON, nullable=True)   # ["temperature", "humidity", "light"]
+    widgets = Column(JSON, nullable=True)   # Widget configuration for widget-based reports
     status = Column(String(20), default="pending")  # 'pending'|'processing'|'completed'|'failed'
     file_path = Column(String(500), nullable=True)
     file_size = Column(Integer, nullable=True)
